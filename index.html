@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Bohemian Tales - A Medieval RPG</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+</head>
+<body>
+    <div id="game-container">
+        <div id="loading-screen">
+            <div class="loading-content">
+                <h1>⚔️ Bohemian Tales ⚔️</h1>
+                <p>A Medieval RPG inspired by Kingdom Come: Deliverance</p>
+                <div class="loading-bar">
+                    <div class="loading-progress"></div>
+                </div>
+                <p class="loading-text">Loading the realm of Bohemia...</p>
+            </div>
+        </div>
+        <div id="game"></div>
+        <div id="mobile-controls">
+            <div class="dpad">
+                <button class="dpad-btn up" data-dir="up">▲</button>
+                <button class="dpad-btn left" data-dir="left">◄</button>
+                <button class="dpad-btn right" data-dir="right">►</button>
+                <button class="dpad-btn down" data-dir="down">▼</button>
+            </div>
+            <div class="action-buttons">
+                <button class="action-btn attack">⚔️</button>
+                <button class="action-btn interact">💬</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Game Scripts -->
+    <script src="js/constants.js"></script>
+    <script src="js/assets.js"></script>
+    <script src="js/data/npcs.js"></script>
+    <script src="js/data/quests.js"></script>
+    <script src="js/data/items.js"></script>
+    <script src="js/data/dialogue.js"></script>
+    <script src="js/systems/inventory.js"></script>
+    <script src="js/systems/quest.js"></script>
+    <script src="js/systems/reputation.js"></script>
+    <script src="js/systems/combat.js"></script>
+    <script src="js/systems/save.js"></script>
+    <script src="js/systems/npcAI.js"></script>
+    <script src="js/scenes/BootScene.js"></script>
+    <script src="js/scenes/MenuScene.js"></script>
+    <script src="js/scenes/GameScene.js"></script>
+    <script src="js/scenes/UIScene.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>
