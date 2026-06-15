@@ -47,7 +47,7 @@ const UIKit = {
     c.setSize(w, h);
     c.setInteractive(new Phaser.Geom.Rectangle(-w / 2, -h / 2, w, h), Phaser.Geom.Rectangle.Contains);
     c.on('pointerdown', () => { draw(true); txt.y = 3; });
-    c.on('pointerup', () => { draw(false); txt.y = 0; onClick && onClick(); });
+    c.on('pointerup', () => { draw(false); txt.y = 0; if (typeof Sfx !== 'undefined') Sfx.click(); onClick && onClick(); });
     c.on('pointerout', () => { draw(false); txt.y = 0; });
     if (opt.depth != null) c.setDepth(opt.depth);
     c._redraw = draw;

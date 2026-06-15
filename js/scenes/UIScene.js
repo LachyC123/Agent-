@@ -52,6 +52,36 @@ class UIScene extends Phaser.Scene {
     this.input.on('pointerup', (p) => this.onUp(p));
 
     this.killFeed = UIKit.text(this, W / 2, 90, '', 14, PAL.yellow, { stroke: PAL.black, strokeW: 4, depth: 10 });
+
+    // ---- KILL FEED (event-driven) ----
+    this.kills = [];
+    this._killHandler = (d) => this.addKill(d);
+    this.game_.events.on('kill', this._killHandler);
+    this.events.once('shutdown', () => this.game_.events.off('kill', this._killHandler));
+  }
+
+  addKill(d) {
+    const line = (d.a ? d.a + '  ✕  ' : '') + d.b;
+    const txt = UIKit.text(this, this.W - 14, 0, line, 12, d.color, {
+      originX: 1, stroke: PAL.black, strokeW: 3, depth: 45,
+    });
+    const entry = { txt };
+    this.kills.unshift(entry);
+    while (this.kills.length > 4) { const e = this.kills.pop(); e.txt.destroy(); }
+    this.layoutKills();
+    this.time.delayedCall(3500, () => {
+      const i = this.kills.indexOf(entry);
+      if (i >= 0) {
+        this.tweens.add({
+          targets: entry.txt, alpha: 0, duration: 400,
+          onComplete: () => { entry.txt.destroy(); const j = this.kills.indexOf(entry); if (j >= 0) this.kills.splice(j, 1); },
+        });
+      }
+    });
+  }
+
+  layoutKills() {
+    this.kills.forEach((e, i) => { e.txt.y = 110 + i * 20; });
   }
 
   roundBtn(x, y, r, iconKey, color, isFire, abilityIdx) {
@@ -70,6 +100,7 @@ class UIScene extends Phaser.Scene {
     zone.setInteractive(new Phaser.Geom.Circle(r, r, r), Phaser.Geom.Circle.Contains);
     const obj = { g, icon, x, y, r, draw, abilityIdx, ready: true };
     zone.on('pointerdown', () => {
+      if (typeof Sfx !== 'undefined') Sfx.resume();
       draw(true); icon.setScale(r / 11 * 0.85);
       if (isFire) { this.game_.firing = true; }
       else if (abilityIdx === 'ult') { this.game_.useUlt(); }

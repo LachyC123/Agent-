@@ -4,13 +4,13 @@ const GRID_W = 20, GRID_H = 14;
 
 // Fixed enemy team composition (respawn instead of waves)
 const ENEMY_TEAM_DEF = [
-  { id: 'e0', variant: 'grunt', gx: 17, gy: 5, role: 'contester',
+  { id: 'e0', name: 'RAIDER', variant: 'grunt', gx: 17, gy: 5, role: 'contester',
     stats: { hp: 150, speed: 2.6 },
     weapon: { dmg: 9, rate: 220, range: 6, spread: 0.05, proj: 'boltRed', auto: true } },
-  { id: 'e1', variant: 'heavy', gx: 17, gy: 7, role: 'hunter',
+  { id: 'e1', name: 'BRUTE', variant: 'heavy', gx: 17, gy: 7, role: 'hunter',
     stats: { hp: 350, speed: 1.9 },
     weapon: { dmg: 14, rate: 340, range: 5.5, spread: 0.06, proj: 'boltRed', auto: true } },
-  { id: 'e2', variant: 'grunt', gx: 17, gy: 9, role: 'flanker',
+  { id: 'e2', name: 'STALKER', variant: 'grunt', gx: 17, gy: 9, role: 'flanker',
     stats: { hp: 130, speed: 2.9 },
     weapon: { dmg: 8, rate: 200, range: 6.5, spread: 0.04, proj: 'boltRed', auto: true } },
 ];
@@ -30,7 +30,10 @@ class GameScene extends Phaser.Scene {
     this.firing = false;
     this.moveVec = { x: 0, y: 0 };
 
+    this.freezeT = 0; // hit-stop timer (ms)
+
     this.buildMap();
+    this.setupParticles();
     this.spawnPayload();
     this.spawnTeams();
 
@@ -83,6 +86,30 @@ class GameScene extends Phaser.Scene {
     const x = Math.round(gx), y = Math.round(gy);
     if (x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) return true;
     return this.grid[y][x] === 1;
+  }
+
+  // ---------- PARTICLES ----------
+  setupParticles() {
+    this.emit = {};
+    [['cyan', 'sparkCyan'], ['red', 'sparkRed'], ['lime', 'sparkLime'],
+     ['orange', 'sparkOrange'], ['white', 'sparkWhite']].forEach(([name, key]) => {
+      this.emit[name] = this.add.particles(0, 0, key, {
+        speed: { min: 40, max: 150 },
+        lifespan: { min: 200, max: 480 },
+        scale: { start: 2.2, end: 0 },
+        alpha: { start: 1, end: 0 },
+        rotate: { min: 0, max: 360 },
+        blendMode: 'ADD',
+        emitting: false,
+      }).setDepth(58850);
+    });
+  }
+
+  burst(name, gx, gy, count = 6) {
+    const e = this.emit[name];
+    if (!e) return;
+    const sp = Iso.toScreen(gx, gy);
+    e.explode(count, sp.x, sp.y - 14);
   }
 
   // ---------- PAYLOAD ----------
@@ -172,7 +199,7 @@ class GameScene extends Phaser.Scene {
       fireCd: 0, alive: true, cd: {}, ult: 0, buffs: {},
       respawn: { gx: def.gx, gy: def.gy },
       variant: def.variant, botKey: heavy ? 'bot_heavy' : 'bot_grunt',
-      aiRole: def.role,
+      aiRole: def.role, dispName: def.name,
     };
     u.sprite.play((heavy ? 'bot_heavy' : 'bot_grunt') + '_side_idle');
     this.units.push(u);
@@ -182,6 +209,8 @@ class GameScene extends Phaser.Scene {
   // ---------- MAIN LOOP ----------
   update(time, dt) {
     if (this.gameOver) return;
+    // Hit-stop: hold the simulation for a few frames on heavy impacts for punch.
+    if (this.freezeT > 0) { this.freezeT -= dt; this.drawBars(); return; }
     this.matchTime -= dt;
     if (this.matchTime <= 0) { this.endMatch(false); return; }
 
@@ -379,7 +408,7 @@ class GameScene extends Phaser.Scene {
       if (ally) {
         this.spawnBolt(u, ally, { heal: w.heal, proj: 'orbHeal', team: u.team });
         u.fireCd = w.rate;
-        if (u.isPlayer) this.gainUlt(u, 6);
+        if (u.isPlayer) { this.gainUlt(u, 6); Sfx.heal(); }
         return;
       }
     }
@@ -402,6 +431,10 @@ class GameScene extends Phaser.Scene {
     }
     u.fireCd = w.rate * (u.buffs.rampage ? 0.5 : 1);
     this.muzzle(u, aim);
+    if (u.isPlayer) {
+      const pitch = u.hero.id === 'brick' ? 0.6 : (u.hero.id === 'bloom' ? 1.2 : 1);
+      Sfx.shot(pitch);
+    }
   }
 
   spawnBolt(u, lockTarget, o) {
@@ -461,16 +494,44 @@ class GameScene extends Phaser.Scene {
     // Hit flash — brief white tint then clear
     u.sprite.setTint(0xffffff);
     this.time.delayedCall(80, () => { if (u.sprite?.active) u.sprite.clearTint(); });
+
+    const heavy = amount >= 28;
+    const byPlayer = !!from?.isPlayer;
+    // Particles coloured by attacker side; player hits read as cyan
+    this.burst(from?.team === 'ally' ? 'cyan' : 'red', u.gx, u.gy, heavy ? 9 : 5);
+    // Floating damage number (only the player's own contributions, to avoid clutter)
+    if (byPlayer) this.damageNumber(u.gx, u.gy, amount, heavy ? 'crit' : 'dmg');
+    // Audio + punch
+    if (byPlayer || u.isPlayer) Sfx.hit();
+    if (heavy && byPlayer) { this.hitStop(55); this.cameras.main.shake(80, 0.004); }
+
     if (from?.isPlayer) this.gainUlt(from, amount * 0.5);
     if (u.hp <= 0) this.kill(u, from);
   }
 
-  heal(u, amount) { u.hp = Math.min(u.maxHp, u.hp + amount); }
+  heal(u, amount) {
+    const before = u.hp;
+    u.hp = Math.min(u.maxHp, u.hp + amount);
+    const gained = u.hp - before;
+    if (gained > 0 && (amount >= 20 || u.isPlayer)) {
+      this.burst('lime', u.gx, u.gy, 3);
+      this.damageNumber(u.gx, u.gy, gained, 'heal');
+    }
+  }
 
   kill(u, from) {
     u.hp = 0; u.alive = false;
-    this.boom(u.gx, u.gy, u.team === 'enemy' ? 'sparkRed' : 'sparkCyan');
-    if (from?.isPlayer) this.gainUlt(from, 18);
+    this.burst(u.team === 'enemy' ? 'red' : 'cyan', u.gx, u.gy, 14);
+    this.burst('white', u.gx, u.gy, 6);
+    Sfx.kill();
+    // Kill feed + extra punch when the player gets the elimination
+    this.events.emit('kill', {
+      a: from ? this.unitName(from) : '',
+      b: this.unitName(u),
+      color: from && from.team === 'ally' ? TEAM.ally : TEAM.enemy,
+    });
+    if (from?.isPlayer) { this.gainUlt(from, 18); this.hitStop(60); this.cameras.main.shake(120, 0.005); }
+    if (u.isPlayer) { this.flashScreen(PAL.red, 0.4); }
 
     // Both teams respawn — Overwatch style
     const delay = u.isPlayer ? 3000 : (u.team === 'enemy' ? 6000 : 5000);
@@ -494,6 +555,7 @@ class GameScene extends Phaser.Scene {
     }
     this.time.delayedCall(400, () => { if (u.sprite?.active) u.sprite.setAlpha(1); });
     this.ringFx(u.gx, u.gy, u.team === 'enemy' ? PAL.red : PAL.cyan, 2);
+    if (u.isPlayer) Sfx.respawn();
   }
 
   gainUlt(u, amount) {
@@ -510,6 +572,7 @@ class GameScene extends Phaser.Scene {
     const now = performance.now();
     if ((u.cd[ab.key] || 0) > now) return;
     u.cd[ab.key] = now + ab.cd;
+    Sfx.ability();
     this.castAbility(u, ab.key);
   }
 
@@ -584,6 +647,12 @@ class GameScene extends Phaser.Scene {
   castUlt(u) {
     const id = u.hero.id;
     this.bigText(u.hero.ult.name + '!', u.hero.color);
+    // Cinematic punch for the ultimate
+    Sfx.ult();
+    this.flashScreen(u.hero.color, 0.45);
+    this.cameraPunch(0.12);
+    this.cameras.main.shake(260, 0.009);
+    this.hitStop(70);
     if (id === 'zap') {
       u.buffs.rampage = performance.now() + 5000;
     } else if (id === 'brick') {
@@ -634,6 +703,41 @@ class GameScene extends Phaser.Scene {
   }
 
   // ---------- FX ----------
+  unitName(u) {
+    if (!u) return '';
+    return u.hero ? u.hero.name : (u.dispName || 'BOT');
+  }
+
+  hitStop(ms) { this.freezeT = Math.max(this.freezeT, ms); }
+
+  flashScreen(color, alpha = 0.4) {
+    const cam = this.cameras.main;
+    const r = this.add.rectangle(cam.midPoint.x, cam.midPoint.y, this.scale.width * 2, this.scale.height * 2,
+      Phaser.Display.Color.HexStringToColor(color).color)
+      .setScrollFactor(0).setDepth(69000).setAlpha(alpha);
+    this.tweens.add({ targets: r, alpha: 0, duration: 350, onComplete: () => r.destroy() });
+  }
+
+  cameraPunch(amount = 0.1) {
+    const cam = this.cameras.main;
+    this.tweens.add({ targets: cam, zoom: 1.05 + amount, duration: 90, yoyo: true, ease: 'Quad.out' });
+  }
+
+  damageNumber(gx, gy, amount, kind) {
+    const sp = Iso.toScreen(gx, gy);
+    const color = kind === 'heal' ? PAL.lime : (kind === 'crit' ? PAL.yellow : PAL.white);
+    const size = kind === 'crit' ? 22 : 15;
+    const t = this.add.text(sp.x + (Math.random() * 12 - 6), sp.y - 32,
+      (kind === 'heal' ? '+' : '') + Math.round(amount), {
+        fontFamily: 'monospace', fontSize: size + 'px', color, fontStyle: 'bold',
+      }).setOrigin(0.5).setDepth(61000);
+    t.setStroke(PAL.black, 4);
+    this.tweens.add({
+      targets: t, y: t.y - 28, alpha: 0, duration: 700, ease: 'Quad.out',
+      onComplete: () => t.destroy(),
+    });
+  }
+
   muzzle(u, aim) {
     const sp = Iso.toScreen(u.gx, u.gy);
     const f = this.add.image(sp.x + aim.x * 14, sp.y - 14 + aim.y * 8, 'sparkWhite').setScale(2).setDepth(58500);
@@ -644,18 +748,6 @@ class GameScene extends Phaser.Scene {
     const sp = Iso.toScreen(gx, gy);
     const s = this.add.image(sp.x, sp.y - 14, key).setScale(2.2).setDepth(58800);
     this.tweens.add({ targets: s, alpha: 0, scale: 0.6, angle: 90, duration: 220, onComplete: () => s.destroy() });
-  }
-
-  boom(gx, gy, key) {
-    const sp = Iso.toScreen(gx, gy);
-    for (let i = 0; i < 8; i++) {
-      const s = this.add.image(sp.x, sp.y - 14, key).setScale(2.5).setDepth(58900);
-      const a = Math.random() * Math.PI * 2, d = 20 + Math.random() * 24;
-      this.tweens.add({
-        targets: s, x: sp.x + Math.cos(a)*d, y: sp.y - 14 + Math.sin(a)*d,
-        alpha: 0, scale: 0.4, duration: 400, onComplete: () => s.destroy(),
-      });
-    }
   }
 
   ringFx(gx, gy, color, radius = 1.5) {

@@ -18,6 +18,8 @@ class ResultScene extends Phaser.Scene {
     const color = this.win ? PAL.lime : PAL.red;
     const label = this.win ? 'VICTORY' : 'DEFEAT';
 
+    if (typeof Sfx !== 'undefined') { this.win ? Sfx.victory() : Sfx.defeat(); }
+
     // banner glow
     const glow = this.add.graphics();
     glow.fillStyle(Phaser.Display.Color.HexStringToColor(color).color, 0.18);

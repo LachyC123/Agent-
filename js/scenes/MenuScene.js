@@ -41,6 +41,9 @@ class MenuScene extends Phaser.Scene {
     UIKit.text(this, W / 2, H - 24, 'tap & drag to move · buttons to fight', 12, PAL.steelDk);
 
     this.cameras.main.fadeIn(300, 0, 0, 0);
+
+    // Audio unlocks on first user gesture (browser autoplay policy)
+    this.input.once('pointerdown', () => { Sfx.resume(); Sfx.startMusic(); });
   }
 
   update(_, dt) {
