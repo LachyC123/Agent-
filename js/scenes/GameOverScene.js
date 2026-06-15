@@ -6,6 +6,7 @@ class GameOverScene extends Phaser.Scene {
     this.floor = data.floor || 1;
     this.level = data.level || 1;
     this.gold  = data.gold  || 0;
+    this.kills = data.kills || 0;
   }
 
   create() {
@@ -113,6 +114,7 @@ class GameOverScene extends Phaser.Scene {
     const lines = [
       `Floor reached:  ${this.floor}`,
       `Level attained: ${this.level}`,
+      `Clowns slain:   ${this.kills}`,
       `Gold collected: ${this.gold}g`,
     ];
     lines.forEach((line, i) => {
