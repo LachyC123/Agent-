@@ -1,19 +1,23 @@
+// main.js — Phaser game configuration for NEON RIFT.
+// Mobile-first: portrait-friendly canvas that scales to fit any screen,
+// crisp pixel-art rendering, and a touch-driven control scheme.
+
+const GAME_W = 480;
+const GAME_H = 854; // ~9:16 portrait
+
 const config = {
   type: Phaser.AUTO,
   parent: 'game',
-  width: 360,
-  height: 640,
-  backgroundColor: '#0a0006',
+  width: GAME_W,
+  height: GAME_H,
+  backgroundColor: PAL.void,
+  pixelArt: true,
+  roundPixels: true,
   scale: {
     mode: Phaser.Scale.FIT,
-    autoCenter: Phaser.Scale.CENTER_BOTH
+    autoCenter: Phaser.Scale.CENTER_BOTH,
   },
-  scene: [BootScene, MenuScene, GameScene, UIScene, GameOverScene],
-  render: {
-    pixelArt: true,
-    antialias: false,
-    roundPixels: true
-  }
+  scene: [BootScene, MenuScene, SelectScene, GameScene, UIScene, ResultScene],
 };
 
-window.game = new Phaser.Game(config);
+const game = new Phaser.Game(config);

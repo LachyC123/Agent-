@@ -1,899 +1,543 @@
-// Generates all game textures procedurally using Phaser Graphics.
-// Each "sprite sheet" is a single texture with named frames.
+// SpriteGen.js — procedural pixel-art generator for NEON RIFT.
+// Everything is drawn pixel-by-pixel onto an offscreen canvas and registered as
+// a Phaser texture. No external image files: the whole art set is "hand crafted"
+// in code so the style stays perfectly consistent.
+
+class PixelCanvas {
+  constructor(w, h) {
+    this.w = w;
+    this.h = h;
+    this.cv = document.createElement('canvas');
+    this.cv.width = w;
+    this.cv.height = h;
+    this.ctx = this.cv.getContext('2d');
+    this.ctx.imageSmoothingEnabled = false;
+  }
+  px(x, y, c) {
+    if (!c) return;
+    x |= 0; y |= 0;
+    if (x < 0 || y < 0 || x >= this.w || y >= this.h) return;
+    this.ctx.fillStyle = c;
+    this.ctx.fillRect(x, y, 1, 1);
+  }
+  rect(x, y, w, h, c) {
+    if (!c) return;
+    this.ctx.fillStyle = c;
+    this.ctx.fillRect(x | 0, y | 0, w | 0, h | 0);
+  }
+  // mirror-aware horizontal pair around vertical axis cx
+  pair(cx, dx, y, c) {
+    this.px(cx - dx, y, c);
+    this.px(cx + dx, y, c);
+  }
+  hline(x0, x1, y, c) {
+    for (let x = x0; x <= x1; x++) this.px(x, y, c);
+  }
+  vline(x, y0, y1, c) {
+    for (let y = y0; y <= y1; y++) this.px(x, y, c);
+  }
+  // filled circle (chunky)
+  disc(cx, cy, r, c) {
+    for (let y = -r; y <= r; y++)
+      for (let x = -r; x <= r; x++)
+        if (x * x + y * y <= r * r + r * 0.5) this.px(cx + x, cy + y, c);
+  }
+  ring(cx, cy, r, c) {
+    for (let a = 0; a < 360; a += 6) {
+      const rad = a * Math.PI / 180;
+      this.px(cx + Math.round(Math.cos(rad) * r), cy + Math.round(Math.sin(rad) * r), c);
+    }
+  }
+  // isometric diamond (top face) centred at cx,cy with half-width hw, half-height hh
+  diamond(cx, cy, hw, hh, c) {
+    for (let y = -hh; y <= hh; y++) {
+      const span = Math.round(hw * (1 - Math.abs(y) / hh));
+      this.hline(cx - span, cx + span, cy + y, c);
+    }
+  }
+  diamondEdge(cx, cy, hw, hh, c) {
+    for (let y = -hh; y <= hh; y++) {
+      const span = Math.round(hw * (1 - Math.abs(y) / hh));
+      this.px(cx - span, cy + y, c);
+      this.px(cx + span, cy + y, c);
+    }
+  }
+  // soft drop shadow ellipse
+  shadow(cx, cy, rw, rh, c) {
+    for (let y = -rh; y <= rh; y++)
+      for (let x = -rw; x <= rw; x++)
+        if ((x * x) / (rw * rw) + (y * y) / (rh * rh) <= 1) this.px(cx + x, cy + y, c);
+  }
+  toTexture(scene, key) {
+    if (scene.textures.exists(key)) scene.textures.remove(key);
+    scene.textures.addCanvas(key, this.cv);
+  }
+}
+
 const SpriteGen = {
-  TS: 24, // tile size in pixels
-
-  // palette
-  C: {
-    BLACK:    0x000000,
-    VOID:     0x05000a,
-    DARK:     0x0d0615,
-    MID:      0x1a0e2a,
-    STONE:    0x2a1e3a,
-    STONE2:   0x3a2e4a,
-    RED:      0xcc1111,
-    RED2:     0xff3333,
-    PINK:     0xff8888,
-    SKIN:     0xffe0cc,
-    SKIN2:    0xffbbaa,
-    WHITE:    0xffffff,
-    CREAM:    0xf5e6d0,
-    YELLOW:   0xffee00,
-    GOLD:     0xffaa00,
-    ORANGE:   0xff6600,
-    ORANGE2:  0xff9933,
-    PURPLE:   0x660088,
-    PURPLE2:  0xaa33cc,
-    VIOLET:   0xcc66ff,
-    BLUE:     0x1133aa,
-    BLUE2:    0x3366dd,
-    CYAN:     0x22aacc,
-    GREEN:    0x226622,
-    GREEN2:   0x44aa44,
-    LIME:     0x88ff44,
-    BROWN:    0x6b3a1f,
-    BROWN2:   0x8b5a2b,
-    GRAY:     0x666677,
-    GRAY2:    0x998899,
-    TAN:      0xaa9955,
-    BLOOD:    0x8b0000,
-    FLAME1:   0xff6600,
-    FLAME2:   0xffcc00,
-    BALLOON_R:0xff4466,
-    BALLOON_B:0x44aaff,
-    BALLOON_G:0x44ff88,
-    BALLOON_Y:0xffee44,
-  },
-
-  init(scene) {
-    this.generateTiles(scene);
-    this.generatePlayer(scene);
-    this.generateEnemies(scene);
-    this.generateItems(scene);
-    this.generateEffects(scene);
-    this.generateUI(scene);
-  },
-
-  // Draw one "art pixel" (px,py in 8x8 grid coords) at screen offset (ox,oy)
-  px(g, col, ox, oy, ps, px, py, w = 1, h = 1) {
-    g.fillStyle(col, 1);
-    g.fillRect(ox + px * ps, oy + py * ps, ps * w, ps * h);
-  },
-
-  // ── TILES ──────────────────────────────────────────────────────────────
-
-  generateTiles(scene) {
-    const TS = this.TS;
-    const ps = TS / 8; // 3 px per art pixel
-    const C = this.C;
-    // 10 tiles in a row: floor, wall, door, stairs, torch, blood, void, fog, prop, floor2
-    const W = TS * 10;
-    const g = scene.make.graphics({ x: 0, y: 0, add: false });
-
-    // TILE 0 — floor
-    this.drawFloor(g, 0, 0, TS, ps, C);
-    // TILE 1 — wall
-    this.drawWall(g, TS, 0, TS, ps, C);
-    // TILE 2 — door
-    this.drawDoor(g, TS * 2, 0, TS, ps, C);
-    // TILE 3 — stairs down
-    this.drawStairs(g, TS * 3, 0, TS, ps, C);
-    // TILE 4 — torch
-    this.drawTorch(g, TS * 4, 0, TS, ps, C);
-    // TILE 5 — blood floor
-    this.drawBloodFloor(g, TS * 5, 0, TS, ps, C);
-    // TILE 6 — void
-    g.fillStyle(C.VOID, 1);
-    g.fillRect(TS * 6, 0, TS, TS);
-    // TILE 7 — fog of war
-    g.fillStyle(C.DARK, 1);
-    g.fillRect(TS * 7, 0, TS, TS);
-    // TILE 8 — prop (broken barrel)
-    this.drawBarrel(g, TS * 8, 0, TS, ps, C);
-    // TILE 9 — floor2 (carnival flag floor)
-    this.drawFloor2(g, TS * 9, 0, TS, ps, C);
-
-    g.generateTexture('tiles', W, TS);
-    g.destroy();
-
-    const tex = scene.textures.get('tiles');
-    const names = ['floor', 'wall', 'door', 'stairs', 'torch', 'blood', 'void', 'fog', 'barrel', 'floor2'];
-    names.forEach((n, i) => tex.add(n, 0, i * TS, 0, TS, TS));
-  },
-
-  drawFloor(g, ox, oy, TS, ps, C) {
-    g.fillStyle(C.MID, 1);
-    g.fillRect(ox, oy, TS, TS);
-    // subtle tile lines
-    g.fillStyle(C.DARK, 1);
-    g.fillRect(ox, oy, TS, 1);
-    g.fillRect(ox, oy, 1, TS);
-    // corner dots
-    g.fillStyle(C.STONE, 0.6);
-    g.fillRect(ox + 1, oy + 1, 2, 2);
-    g.fillRect(ox + TS - 3, oy + TS - 3, 2, 2);
-    // faint pentagram hint
-    g.fillStyle(C.PURPLE, 0.4);
-    g.fillRect(ox + ps * 3, oy + ps * 1, ps, ps);
-    g.fillRect(ox + ps * 1, oy + ps * 4, ps, ps);
-    g.fillRect(ox + ps * 5, oy + ps * 4, ps, ps);
-    g.fillRect(ox + ps * 2, oy + ps * 6, ps, ps);
-    g.fillRect(ox + ps * 4, oy + ps * 6, ps, ps);
-  },
-
-  drawWall(g, ox, oy, TS, ps, C) {
-    g.fillStyle(C.STONE, 1);
-    g.fillRect(ox, oy, TS, TS);
-    // bricks
-    g.fillStyle(C.DARK, 1);
-    g.fillRect(ox, oy + ps * 2, TS, 1);
-    g.fillRect(ox, oy + ps * 5, TS, 1);
-    g.fillRect(ox + ps * 4, oy, 1, ps * 2);
-    g.fillRect(ox + ps * 2, oy + ps * 2, 1, ps * 3);
-    g.fillRect(ox + ps * 5, oy + ps * 5, 1, ps * 3);
-    // highlight top
-    g.fillStyle(C.STONE2, 1);
-    g.fillRect(ox, oy, TS, 2);
-    // blood drip
-    g.fillStyle(C.BLOOD, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 1, ps - 1, ps * 3);
-    g.fillRect(ox + ps * 3, oy + ps * 3, ps + 1, ps);
-  },
-
-  drawDoor(g, ox, oy, TS, ps, C) {
-    g.fillStyle(C.BROWN, 1);
-    g.fillRect(ox, oy, TS, TS);
-    // planks
-    g.fillStyle(C.BROWN2, 1);
-    g.fillRect(ox + 2, oy, 7, TS);
-    g.fillRect(ox + 13, oy, 7, TS);
-    // iron bands
-    g.fillStyle(C.GRAY, 1);
-    g.fillRect(ox, oy + ps * 2, TS, 2);
-    g.fillRect(ox, oy + ps * 5, TS, 2);
-    // knocker
-    g.fillStyle(C.GOLD, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 3, ps * 2, ps * 2);
-    g.fillStyle(C.DARK, 1);
-    g.fillRect(ox + ps * 3 + 2, oy + ps * 3 + 2, ps * 2 - 4, ps * 2 - 4);
-    // clown face carved
-    g.fillStyle(C.BROWN2, 1);
-    g.fillRect(ox + ps * 5, oy + ps * 1, ps * 2, ps * 2);
-    g.fillStyle(C.RED, 1);
-    g.fillRect(ox + ps * 5 + 3, oy + ps * 1 + 4, 3, 3);
-  },
-
-  drawStairs(g, ox, oy, TS, ps, C) {
-    g.fillStyle(C.MID, 1);
-    g.fillRect(ox, oy, TS, TS);
-    // spiral
-    g.fillStyle(C.STONE, 1);
-    g.fillRect(ox + ps, oy + ps * 2, ps * 6, ps);
-    g.fillRect(ox + ps, oy + ps * 4, ps * 5, ps);
-    g.fillRect(ox + ps, oy + ps * 6, ps * 4, ps);
-    // edge highlight
-    g.fillStyle(C.GRAY2, 1);
-    g.fillRect(ox + ps, oy + ps * 2, ps * 6, 1);
-    g.fillRect(ox + ps, oy + ps * 4, ps * 5, 1);
-    g.fillRect(ox + ps, oy + ps * 6, ps * 4, 1);
-    // center void
-    g.fillStyle(C.DARK, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 3, ps * 2, ps * 2);
-  },
-
-  drawTorch(g, ox, oy, TS, ps, C) {
-    g.fillStyle(C.MID, 1);
-    g.fillRect(ox, oy, TS, TS);
-    // bracket
-    g.fillStyle(C.GRAY, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 4, ps * 2, ps * 3);
-    g.fillRect(ox + ps * 2, oy + ps * 6, ps * 4, ps);
-    // torch body
-    g.fillStyle(C.BROWN, 1);
-    g.fillRect(ox + ps * 3 + 2, oy + ps * 2, ps - 2, ps * 3);
-    // flame
-    g.fillStyle(C.FLAME2, 1);
-    g.fillRect(ox + ps * 3, oy + ps, ps, ps);
-    g.fillStyle(C.FLAME1, 1);
-    g.fillRect(ox + ps * 3 - 2, oy + ps, ps + 4, ps * 2);
-    g.fillStyle(C.YELLOW, 0.8);
-    g.fillRect(ox + ps * 3 + 1, oy, ps - 2, ps);
-  },
-
-  drawBloodFloor(g, ox, oy, TS, ps, C) {
-    this.drawFloor(g, ox, oy, TS, ps, C);
-    // blood splatters
-    g.fillStyle(C.BLOOD, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 3, ps * 2, ps);
-    g.fillRect(ox + ps * 3, oy + ps * 2, ps, ps * 3);
-    g.fillRect(ox + ps * 5, oy + ps * 5, ps, ps * 2);
-    g.fillRect(ox + ps * 1, oy + ps * 6, ps * 2, ps);
-    g.fillStyle(C.RED, 0.5);
-    g.fillRect(ox + ps * 4, oy + ps * 4, ps * 3, ps * 2);
-  },
-
-  drawBarrel(g, ox, oy, TS, ps, C) {
-    g.fillStyle(C.MID, 1);
-    g.fillRect(ox, oy, TS, TS);
-    g.fillStyle(C.BROWN, 1);
-    g.fillRect(ox + ps, oy + ps, ps * 6, ps * 6);
-    g.fillStyle(C.BROWN2, 1);
-    g.fillRect(ox + ps + 1, oy + ps + 1, ps * 6 - 2, ps * 2 - 1);
-    g.fillRect(ox + ps + 1, oy + ps * 4 + 1, ps * 6 - 2, ps * 2 - 1);
-    g.fillStyle(C.GRAY, 1);
-    g.fillRect(ox + ps, oy + ps * 3, ps * 6, 2);
-    g.fillRect(ox + ps, oy + ps * 4, ps * 6, 2);
-    // skull
-    g.fillStyle(C.CREAM, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 2, ps * 2, ps * 2);
-    g.fillStyle(C.DARK, 1);
-    g.fillRect(ox + ps * 3 + 1, oy + ps * 2 + 2, 2, 2);
-    g.fillRect(ox + ps * 4 + 1, oy + ps * 2 + 2, 2, 2);
-  },
-
-  drawFloor2(g, ox, oy, TS, ps, C) {
-    g.fillStyle(C.MID, 1);
-    g.fillRect(ox, oy, TS, TS);
-    // checkerboard hint
-    g.fillStyle(C.RED, 0.25);
-    g.fillRect(ox, oy, ps * 2, ps * 2);
-    g.fillRect(ox + ps * 4, oy, ps * 2, ps * 2);
-    g.fillRect(ox + ps * 2, oy + ps * 2, ps * 2, ps * 2);
-    g.fillRect(ox + ps * 6, oy + ps * 2, ps * 2, ps * 2);
-    g.fillRect(ox, oy + ps * 4, ps * 2, ps * 2);
-    g.fillRect(ox + ps * 4, oy + ps * 4, ps * 2, ps * 2);
-    g.fillRect(ox + ps * 2, oy + ps * 6, ps * 2, ps * 2);
-    g.fillRect(ox + ps * 6, oy + ps * 6, ps * 2, ps * 2);
-    g.fillStyle(C.DARK, 1);
-    g.fillRect(ox, oy, TS, 1);
-    g.fillRect(ox, oy, 1, TS);
-  },
-
-  // ── PLAYER ─────────────────────────────────────────────────────────────
-
-  generatePlayer(scene) {
-    const TS = this.TS;
-    const ps = TS / 8;
-    const C = this.C;
-    // 6 frames: idle, walk1, walk2, attack, hurt, dead
-    const W = TS * 6;
-    const g = scene.make.graphics({ x: 0, y: 0, add: false });
-
-    for (let i = 0; i < 6; i++) {
-      this.drawPlayerFrame(g, TS * i, 0, TS, ps, C, i);
+  // ---- ISOMETRIC TILES ----
+  floorTile(scene, key, top, side, edge, glow) {
+    const w = 64, h = 40;
+    const pc = new PixelCanvas(w, h);
+    const cx = 32, cy = 14, hw = 31, hh = 15;
+    // side / depth (3d block under the diamond)
+    for (let d = 0; d < 8; d++) {
+      pc.diamondEdge(cx, cy + d, hw, hh, d < 7 ? side : edge);
     }
-
-    g.generateTexture('player', W, TS);
-    g.destroy();
-
-    const tex = scene.textures.get('player');
-    ['idle', 'walk1', 'walk2', 'attack', 'hurt', 'dead'].forEach((n, i) => {
-      tex.add(n, 0, i * TS, 0, TS, TS);
-    });
-
-    scene.anims.create({
-      key: 'player-walk',
-      frames: [{ key: 'player', frame: 'walk1' }, { key: 'player', frame: 'walk2' }],
-      frameRate: 8,
-      repeat: -1
-    });
-    scene.anims.create({
-      key: 'player-idle',
-      frames: [{ key: 'player', frame: 'idle' }],
-      frameRate: 1,
-      repeat: -1
-    });
-    scene.anims.create({
-      key: 'player-attack',
-      frames: [{ key: 'player', frame: 'attack' }],
-      frameRate: 8,
-      repeat: 0
-    });
-    scene.anims.create({
-      key: 'player-hurt',
-      frames: [{ key: 'player', frame: 'hurt' }],
-      frameRate: 8,
-      repeat: 0
-    });
-  },
-
-  drawPlayerFrame(g, ox, oy, TS, ps, C, frame) {
-    // Hat (jester two-color pointed)
-    const hatL = frame === 3 ? C.PURPLE : C.RED;
-    const hatR = frame === 3 ? C.GREEN2 : C.YELLOW;
-    g.fillStyle(hatL, 1);
-    g.fillRect(ox + ps * 1, oy, ps * 2, ps * 2);
-    g.fillRect(ox + ps * 1, oy + ps * 2, ps, ps);
-    g.fillStyle(hatR, 1);
-    g.fillRect(ox + ps * 4, oy, ps * 2, ps * 2);
-    g.fillRect(ox + ps * 5, oy + ps * 2, ps, ps);
-    g.fillStyle(C.GOLD, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 2, ps * 4, ps);
-    // pompoms
-    g.fillStyle(hatL === C.RED ? C.YELLOW : C.RED, 1);
-    g.fillRect(ox + ps, oy - ps + 2, ps + 1, ps + 1);
-    g.fillRect(ox + ps * 5, oy - ps + 2, ps + 1, ps + 1);
-
-    // Face
-    g.fillStyle(C.WHITE, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 3, ps * 4, ps * 2);
-    // Eyes
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 2 + 2, oy + ps * 3 + 2, ps - 1, ps - 1);
-    g.fillRect(ox + ps * 5 - 1, oy + ps * 3 + 2, ps - 1, ps - 1);
-    // Teardrop (dark)
-    g.fillStyle(C.BLUE2, 1);
-    g.fillRect(ox + ps * 2 + 2, oy + ps * 4 + 1, ps - 2, ps - 2);
-    // Red nose
-    g.fillStyle(C.RED2, 1);
-    g.fillRect(ox + ps * 3 + 1, oy + ps * 4, ps + 1, ps);
-
-    // Mouth (twisted grin)
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 2 + 1, oy + ps * 5 - 1, ps * 4 - 1, 2);
-    g.fillStyle(C.RED, 1);
-    g.fillRect(ox + ps * 2 + 2, oy + ps * 5, ps, 2);
-    g.fillRect(ox + ps * 4 + 1, oy + ps * 5, ps, 2);
-
-    // Body (diamond pattern)
-    const bodyY = oy + ps * 5;
-    g.fillStyle(C.RED, 1);
-    g.fillRect(ox + ps * 2, bodyY, ps * 4, ps * 2);
-    g.fillStyle(C.YELLOW, 0.7);
-    g.fillRect(ox + ps * 3, bodyY, ps * 2, ps);
-    g.fillRect(ox + ps * 2, bodyY + ps, ps, ps);
-    g.fillRect(ox + ps * 5, bodyY + ps, ps, ps);
-
-    // Legs — vary by frame for walk animation
-    const legOff1 = (frame === 1) ? -ps : (frame === 2) ? ps : 0;
-    const legOff2 = -legOff1;
-    g.fillStyle(C.PURPLE, 1);
-    g.fillRect(ox + ps * 2, bodyY + ps * 2, ps + 1, ps);
-    g.fillRect(ox + ps * 5 - 1, bodyY + ps * 2, ps + 1, ps);
-    // Huge clown shoes
-    g.fillStyle(C.RED, 1);
-    g.fillRect(ox + ps * 1 + legOff1, bodyY + ps * 3, ps * 3, ps);
-    g.fillRect(ox + ps * 4 + legOff2, bodyY + ps * 3, ps * 3, ps);
-
-    // Attack pose: arm raised
-    if (frame === 3) {
-      g.fillStyle(C.GOLD, 1);
-      g.fillRect(ox + ps * 6, bodyY, ps * 2, ps);
-      g.fillRect(ox + ps * 6, bodyY - ps, ps, ps * 2);
-    }
-    // Hurt: flash white
-    if (frame === 4) {
-      g.fillStyle(C.WHITE, 0.5);
-      g.fillRect(ox + ps * 2, oy + ps * 3, ps * 4, ps * 5);
-    }
-    // Dead: fallen
-    if (frame === 5) {
-      g.fillStyle(C.BLOOD, 0.6);
-      g.fillRect(ox, oy + ps * 6, TS, ps * 2);
-    }
-  },
-
-  // ── ENEMIES ────────────────────────────────────────────────────────────
-
-  generateEnemies(scene) {
-    const TS = this.TS;
-    const ps = TS / 8;
-    const C = this.C;
-    // 5 enemy types × 3 frames = 15 columns
-    // Types: jester, mime, juggler, balloondog, ringmaster
-    const TYPES = 5;
-    const FRAMES = 3;
-    const W = TS * TYPES * FRAMES;
-    const g = scene.make.graphics({ x: 0, y: 0, add: false });
-
-    const drawers = [
-      this.drawJester.bind(this),
-      this.drawMime.bind(this),
-      this.drawJuggler.bind(this),
-      this.drawBalloonDog.bind(this),
-      this.drawRingmaster.bind(this),
-    ];
-    const names = ['jester', 'mime', 'juggler', 'balloondog', 'ringmaster'];
-
-    drawers.forEach((draw, ti) => {
-      for (let fi = 0; fi < FRAMES; fi++) {
-        draw(g, TS * (ti * FRAMES + fi), 0, TS, ps, C, fi);
+    // bottom fill between left/right edges for the side faces
+    for (let y = -hh; y <= hh; y++) {
+      const span = Math.round(hw * (1 - Math.abs(y) / hh));
+      // left and right vertical skirts
+      for (let d = 1; d < 8; d++) {
+        pc.px(cx - span, cy + y + d, side);
+        pc.px(cx + span, cy + y + d, side);
       }
-    });
+    }
+    // top face
+    pc.diamond(cx, cy, hw, hh, top);
+    // subtle inner grid lines
+    pc.diamondEdge(cx, cy, hw, hh, edge);
+    if (glow) {
+      pc.diamond(cx, cy, hw - 6, hh - 3, glow);
+      pc.diamondEdge(cx, cy, hw - 6, hh - 3, PAL.white);
+    } else {
+      // light speckle texture
+      pc.px(cx - 8, cy - 2, PAL.floorLt);
+      pc.px(cx + 6, cy + 3, PAL.floorLt);
+      pc.px(cx + 12, cy - 4, PAL.floorLt);
+      pc.px(cx - 14, cy + 4, PAL.floorLt);
+    }
+    pc.toTexture(scene, key);
+  },
 
-    g.generateTexture('enemies', W, TS);
-    g.destroy();
-
-    const tex = scene.textures.get('enemies');
-    names.forEach((name, ti) => {
-      for (let fi = 0; fi < FRAMES; fi++) {
-        tex.add(`${name}_${fi}`, 0, TS * (ti * FRAMES + fi), 0, TS, TS);
+  wallCube(scene, key, top, left, right, edge) {
+    const w = 64, h = 64;
+    const pc = new PixelCanvas(w, h);
+    const cx = 32, cy = 22, hw = 31, hh = 15, tall = 22;
+    // left & right faces
+    for (let y = -hh; y <= hh; y++) {
+      const span = Math.round(hw * (1 - Math.abs(y) / hh));
+      for (let d = 0; d <= tall; d++) {
+        pc.px(cx - span, cy + y + d, left);
+        pc.px(cx + span, cy + y + d, right);
       }
-    });
-
-    // Animations
-    names.forEach((name, ti) => {
-      scene.anims.create({
-        key: `${name}-walk`,
-        frames: [
-          { key: 'enemies', frame: `${name}_0` },
-          { key: 'enemies', frame: `${name}_1` },
-        ],
-        frameRate: 6,
-        repeat: -1
-      });
-      scene.anims.create({
-        key: `${name}-hurt`,
-        frames: [{ key: 'enemies', frame: `${name}_2` }],
-        frameRate: 2,
-        repeat: 0
-      });
-    });
-  },
-
-  drawJester(g, ox, oy, TS, ps, C, frame) {
-    // Two-pronged hat (green/purple)
-    g.fillStyle(C.GREEN2, 1);
-    g.fillRect(ox + ps * 1, oy, ps * 2, ps * 2);
-    g.fillStyle(C.PURPLE2, 1);
-    g.fillRect(ox + ps * 5, oy, ps * 2, ps * 2);
-    g.fillStyle(C.GOLD, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 2, ps * 4, ps);
-    // bell tips
-    g.fillStyle(C.GOLD, 1);
-    g.fillRect(ox + ps, oy - 2, ps, ps);
-    g.fillRect(ox + ps * 6, oy - 2, ps, ps);
-    // face - pale/gaunt
-    g.fillStyle(C.SKIN, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 3, ps * 4, ps * 2);
-    // deep black eyes
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 2 + 1, oy + ps * 3 + 2, ps, ps);
-    g.fillRect(ox + ps * 5, oy + ps * 3 + 2, ps, ps);
-    // stitched mouth
-    g.fillStyle(C.RED, 1);
-    g.fillRect(ox + ps * 2 + 2, oy + ps * 4 + 2, ps * 3, 2);
-    g.fillStyle(C.DARK, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 4, 1, ps);
-    g.fillRect(ox + ps * 4 + 1, oy + ps * 4, 1, ps);
-    // bells
-    g.fillStyle(C.GREEN2, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 5, ps * 4, ps * 2);
-    // walk bob
-    const bob = (frame === 1) ? 1 : 0;
-    g.fillStyle(C.PURPLE2, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 6 + bob, ps + 1, ps);
-    g.fillRect(ox + ps * 5 - 1, oy + ps * 6 + bob, ps + 1, ps);
-    // hurt flash
-    if (frame === 2) {
-      g.fillStyle(C.WHITE, 0.4);
-      g.fillRect(ox, oy, TS, TS);
     }
+    // explicit left/right faces
+    for (let y = -hh; y <= hh; y++) {
+      const span = Math.round(hw * (1 - Math.abs(y) / hh));
+      for (let xx = cx - span; xx <= cx; xx++)
+        for (let d = 0; d <= tall; d++) pc.px(xx, cy + y + d, left);
+      for (let xx = cx; xx <= cx + span; xx++)
+        for (let d = 0; d <= tall; d++) pc.px(xx, cy + y + d, right);
+    }
+    // top face
+    pc.diamond(cx, cy, hw, hh, top);
+    pc.diamondEdge(cx, cy, hw, hh, edge);
+    // neon strip detail on faces
+    pc.hline(cx - 14, cx - 2, cy + 16, PAL.cyan);
+    pc.hline(cx + 2, cx + 14, cy + 16, PAL.magenta);
+    pc.toTexture(scene, key);
   },
 
-  drawMime(g, ox, oy, TS, ps, C, frame) {
-    // Beret
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 2, oy, ps * 4, ps);
-    g.fillRect(ox + ps, oy + ps, ps * 6, ps);
-    // face - pure white
-    g.fillStyle(C.WHITE, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 2, ps * 4, ps * 3);
-    // black outlined eyes
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 2, ps + 1, ps + 1);
-    g.fillRect(ox + ps * 5, oy + ps * 2, ps + 1, ps + 1);
-    g.fillStyle(C.WHITE, 1);
-    g.fillRect(ox + ps * 2 + 1, oy + ps * 2 + 1, ps - 1, ps - 1);
-    g.fillRect(ox + ps * 5 + 1, oy + ps * 2 + 1, ps - 1, ps - 1);
-    // mime tear
-    g.fillStyle(C.BLUE2, 1);
-    g.fillRect(ox + ps * 2 + 1, oy + ps * 3 + 1, 2, ps);
-    // frown
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 2 + 2, oy + ps * 4 + 1, ps * 3, 2);
-    g.fillRect(ox + ps * 2 + 1, oy + ps * 4, 2, 2);
-    g.fillRect(ox + ps * 5 + 1, oy + ps * 4, 2, 2);
-    // striped body
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 5, ps * 4, ps * 2);
-    g.fillStyle(C.WHITE, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 5, ps, ps * 2);
-    g.fillRect(ox + ps * 5, oy + ps * 5, ps, ps * 2);
+  // ---- PAYLOAD CART ----
+  payload(scene, key, teamColor) {
+    const w = 56, h = 56;
+    const pc = new PixelCanvas(w, h);
+    const cx = 28;
+    // shadow
+    pc.shadow(cx, 46, 22, 7, 'rgba(0,0,0,0.35)');
+    // wheels (iso base)
+    pc.disc(cx - 13, 42, 4, PAL.ink);
+    pc.disc(cx + 13, 42, 4, PAL.ink);
+    pc.disc(cx - 13, 42, 2, PAL.steel);
+    pc.disc(cx + 13, 42, 2, PAL.steel);
+    // chassis
+    pc.rect(cx - 18, 30, 36, 12, PAL.iron);
+    pc.rect(cx - 18, 30, 36, 2, PAL.steel);
+    // glowing core container
+    pc.rect(cx - 12, 14, 24, 18, PAL.steelDk);
+    pc.rect(cx - 10, 16, 20, 14, PAL.ink);
+    pc.rect(cx - 8, 18, 16, 10, teamColor);
+    pc.rect(cx - 6, 20, 12, 6, PAL.white);
+    // frame edges
+    pc.rect(cx - 13, 13, 26, 2, PAL.steel);
+    pc.vline(cx - 13, 13, 32, PAL.steel);
+    pc.vline(cx + 12, 13, 32, PAL.steel);
+    // antenna beacon
+    pc.vline(cx, 6, 13, PAL.steel);
+    pc.disc(cx, 5, 2, teamColor);
+    pc.disc(cx, 5, 1, PAL.white);
+    pc.toTexture(scene, key);
+  },
+
+  // ---- HUMANOID BUILDER ----
+  // opt: { skin, skinDk, suit, suitDk, accent, accentDk, hair, hairDk,
+  //        visor, bulk, weapon, hairStyle, extra }
+  hero(scene, key, opt, portrait) {
+    const w = 26, h = 34;
+    const pc = new PixelCanvas(w, h);
+    const cx = 13;
+    const bulk = opt.bulk || 0; // 0 slim, 1 normal, 2 wide
+    const sw = 3 + bulk; // shoulder half-width
+    const footY = 30;
+
+    // shadow
+    pc.shadow(cx, footY + 1, 8 + bulk, 3, 'rgba(0,0,0,0.30)');
+
     // legs
-    const step = (frame === 1) ? ps : 0;
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 7 - step, ps + 1, ps + step);
-    g.fillRect(ox + ps * 5 - 1, oy + ps * 7 + step, ps + 1, ps - step);
-    if (frame === 2) {
-      g.fillStyle(C.WHITE, 0.4);
-      g.fillRect(ox, oy, TS, TS);
+    const legColor = opt.suitDk;
+    pc.rect(cx - 3, 24, 2 + bulk, 6, legColor);
+    pc.rect(cx + 2 - bulk, 24, 2 + bulk, 6, legColor);
+    // boots
+    pc.rect(cx - 4, 29, 3 + bulk, 2, opt.accent);
+    pc.rect(cx + 1 - bulk, 29, 3 + bulk, 2, opt.accent);
+
+    // torso
+    pc.rect(cx - sw, 15, sw * 2, 10, opt.suit);
+    pc.rect(cx - sw, 15, sw * 2, 2, opt.suitDk); // shoulder shade
+    // chest accent
+    pc.rect(cx - 1, 16, 2, 7, opt.accent);
+    pc.px(cx, 18, opt.accentDk);
+    // belt
+    pc.hline(cx - sw, cx + sw - 1, 23, opt.accentDk);
+
+    // arms
+    pc.rect(cx - sw - 2, 16, 2, 8, opt.suit);
+    pc.rect(cx + sw, 16, 2, 8, opt.suit);
+    pc.rect(cx - sw - 2, 22, 2, 2, opt.skin); // hands
+    pc.rect(cx + sw, 22, 2, 2, opt.skin);
+
+    // neck + head
+    pc.rect(cx - 1, 13, 2, 2, opt.skinDk);
+    pc.rect(cx - 4, 6, 8, 8, opt.skin);
+    pc.rect(cx - 4, 6, 8, 1, opt.skinDk); // brow shade base
+    // face shade on one side
+    pc.vline(cx + 3, 7, 12, opt.skinDk);
+    // eyes (visor or eyes)
+    if (opt.visor) {
+      pc.rect(cx - 4, 8, 8, 2, PAL.ink);
+      pc.rect(cx - 3, 8, 2, 1, opt.visor);
+      pc.rect(cx + 1, 8, 2, 1, opt.visor);
+    } else {
+      pc.px(cx - 2, 9, PAL.ink);
+      pc.px(cx + 2, 9, PAL.ink);
+      pc.px(cx - 2, 9, opt.eye || PAL.ink);
+      pc.px(cx + 2, 9, opt.eye || PAL.ink);
+      // mouth
+      pc.px(cx, 11, opt.skinDk);
+    }
+
+    // hair / helmet
+    this._headgear(pc, cx, opt);
+
+    // weapon
+    this._weapon(pc, cx, sw, opt);
+
+    // hero-specific extras
+    if (opt.extra) opt.extra(pc, cx, opt);
+
+    pc.toTexture(scene, key);
+
+    if (portrait) this.portrait(scene, portrait, opt);
+  },
+
+  _headgear(pc, cx, opt) {
+    const style = opt.hairStyle;
+    if (style === 'spike') {
+      // spiky arcade hair
+      pc.rect(cx - 4, 4, 8, 3, opt.hair);
+      pc.rect(cx - 5, 5, 1, 2, opt.hair);
+      pc.rect(cx + 4, 5, 1, 2, opt.hair);
+      pc.px(cx - 3, 3, opt.hair); pc.px(cx, 2, opt.hair); pc.px(cx + 3, 3, opt.hair);
+      pc.px(cx - 2, 3, opt.hairDk); pc.px(cx + 2, 3, opt.hairDk);
+      pc.hline(cx - 4, cx + 3, 6, opt.hairDk);
+    } else if (style === 'helmet') {
+      // armored helmet
+      pc.rect(cx - 5, 3, 10, 5, opt.suit);
+      pc.rect(cx - 5, 3, 10, 1, opt.accent);
+      pc.rect(cx - 5, 7, 10, 1, opt.suitDk);
+      // side fins
+      pc.rect(cx - 6, 5, 1, 3, opt.accent);
+      pc.rect(cx + 5, 5, 1, 3, opt.accent);
+      // crest
+      pc.rect(cx - 1, 1, 2, 3, opt.accent);
+    } else if (style === 'hood') {
+      // petal hood (support)
+      pc.rect(cx - 5, 4, 10, 4, opt.suit);
+      pc.px(cx - 5, 3, opt.accent); pc.px(cx + 4, 3, opt.accent);
+      pc.px(cx - 3, 2, opt.accent); pc.px(cx + 2, 2, opt.accent);
+      pc.px(cx, 1, opt.accent);
+      pc.rect(cx - 5, 7, 10, 1, opt.suitDk);
+      // side bangs
+      pc.vline(cx - 5, 7, 11, opt.hair);
+      pc.vline(cx + 4, 7, 11, opt.hair);
     }
   },
 
-  drawJuggler(g, ox, oy, TS, ps, C, frame) {
-    // Flame-colored wild hair
-    g.fillStyle(C.ORANGE, 1);
-    g.fillRect(ox + ps, oy, ps * 6, ps * 2);
-    g.fillStyle(C.RED, 1);
-    g.fillRect(ox, oy + ps, ps, ps * 2);
-    g.fillRect(ox + ps * 7, oy + ps, ps, ps * 2);
-    // face
-    g.fillStyle(C.SKIN2, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 2, ps * 4, ps * 3);
-    // wild wide eyes
-    g.fillStyle(C.YELLOW, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 2 + 1, ps + 1, ps);
-    g.fillRect(ox + ps * 5, oy + ps * 2 + 1, ps + 1, ps);
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 2 + 2, oy + ps * 2 + 2, ps - 2, ps - 2);
-    g.fillRect(ox + ps * 5 + 2, oy + ps * 2 + 2, ps - 2, ps - 2);
-    // maniacal grin
-    g.fillStyle(C.RED, 1);
-    g.fillRect(ox + ps * 2 + 1, oy + ps * 4, ps * 4 - 1, ps - 1);
-    g.fillStyle(C.WHITE, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 4 + 1, ps, ps - 2);
-    g.fillRect(ox + ps * 4 + 1, oy + ps * 4 + 1, ps, ps - 2);
-    // vest
-    g.fillStyle(C.VIOLET, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 5, ps * 4, ps * 2);
-    g.fillStyle(C.GOLD, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 5, ps * 2, 2);
-    g.fillRect(ox + ps * 3, oy + ps * 6, ps * 2, 2);
-    // juggling balls
-    const ballOff = (frame === 0) ? -ps : (frame === 1) ? 0 : ps;
-    g.fillStyle(C.BALLOON_R, 1);
-    g.fillRect(ox + ps * 1, oy + ps * 2 + ballOff, ps, ps);
-    g.fillStyle(C.BALLOON_B, 1);
-    g.fillRect(ox + ps * 6, oy + ps * 3 - ballOff, ps, ps);
-    g.fillStyle(C.BALLOON_G, 1);
-    g.fillRect(ox + ps * 3, oy + ps + ballOff / 2, ps, ps);
-    if (frame === 2) {
-      g.fillStyle(C.WHITE, 0.4);
-      g.fillRect(ox, oy, TS, TS);
+  _weapon(pc, cx, sw, opt) {
+    const wx = cx + sw + 1;
+    if (opt.weapon === 'blaster') {
+      // twin-barrel neon blaster, held to the right
+      pc.rect(wx, 19, 6, 3, PAL.steelDk);
+      pc.rect(wx, 19, 6, 1, PAL.steel);
+      pc.rect(wx + 5, 19, 2, 1, opt.accent);
+      pc.rect(wx + 5, 21, 2, 1, opt.accent);
+      pc.px(wx + 7, 19, opt.accent);
+      pc.px(wx + 7, 21, opt.accent);
+      pc.rect(wx - 1, 22, 2, 2, PAL.iron); // grip
+    } else if (opt.weapon === 'gauntlet') {
+      // big tank fist/gauntlet
+      pc.rect(wx - 1, 18, 5, 6, opt.accentDk);
+      pc.rect(wx - 1, 18, 5, 2, opt.accent);
+      pc.rect(wx, 20, 3, 1, PAL.white);
+      pc.rect(wx + 3, 19, 2, 4, PAL.steel);
+    } else if (opt.weapon === 'staff') {
+      // healer wand with orb
+      pc.vline(wx + 1, 15, 24, PAL.steel);
+      pc.disc(wx + 1, 13, 3, opt.accent);
+      pc.disc(wx + 1, 13, 1, PAL.white);
+      pc.ring(wx + 1, 13, 4, opt.accentDk);
     }
   },
 
-  drawBalloonDog(g, ox, oy, TS, ps, C, frame) {
-    const col = frame === 2 ? C.PINK : C.BALLOON_R;
-    // body (balloon twist)
-    g.fillStyle(col, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 3, ps * 5, ps * 3);
-    // head balloon
-    g.fillRect(ox + ps * 2, oy + ps * 1, ps * 3, ps * 3);
-    // ears
-    g.fillRect(ox + ps * 1, oy + ps, ps * 2, ps * 2);
-    g.fillRect(ox + ps * 4, oy + ps, ps * 2, ps * 2);
-    // legs
-    const step = (frame === 1) ? ps : 0;
-    g.fillRect(ox + ps * 2, oy + ps * 6, ps, ps + step);
-    g.fillRect(ox + ps * 3 + 1, oy + ps * 6, ps, ps - step + 1);
-    g.fillRect(ox + ps * 5, oy + ps * 6, ps, ps + step);
-    // tail
-    g.fillStyle(C.BALLOON_Y, 1);
-    g.fillRect(ox + ps * 6, oy + ps * 3, ps * 2, ps);
-    // dot eyes & nose
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 2 + 2, oy + ps * 1 + 3, 2, 2);
-    g.fillRect(ox + ps * 3 + 2, oy + ps * 1 + 3, 2, 2);
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 3, ps, 2);
-    if (frame === 2) {
-      g.fillStyle(C.WHITE, 0.4);
-      g.fillRect(ox, oy, TS, TS);
+  // ---- PORTRAIT (character select, higher detail) ----
+  portrait(scene, key, opt) {
+    const w = 48, h = 56;
+    const pc = new PixelCanvas(w, h);
+    const cx = 24;
+    // backdrop glow
+    for (let r = 26; r > 8; r--) {
+      const a = (26 - r) / 18 * 0.5;
+      pc.disc(cx, 26, r, `rgba(${this._rgb(opt.accent)},${a.toFixed(2)})`);
     }
-  },
-
-  drawRingmaster(g, ox, oy, TS, ps, C, frame) {
-    // tall top hat
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 2, oy, ps * 4, ps * 3);
-    g.fillStyle(C.RED, 1);
-    g.fillRect(ox + ps, oy + ps * 2, ps * 6, ps);
-    g.fillRect(ox + ps, oy + ps * 3, ps * 6, ps);
-    // pale gaunt face
-    g.fillStyle(C.SKIN, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 3, ps * 4, ps * 2);
-    // sunken eyes
-    g.fillStyle(C.DARK, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 3, ps, ps);
-    g.fillRect(ox + ps * 5, oy + ps * 3, ps, ps);
-    g.fillStyle(C.RED, 1);
-    g.fillRect(ox + ps * 2 + 1, oy + ps * 3 + 1, ps - 2, ps - 2);
-    g.fillRect(ox + ps * 5 + 1, oy + ps * 3 + 1, ps - 2, ps - 2);
-    // thin moustache
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 2 + 2, oy + ps * 4 + 2, ps, 1);
-    g.fillRect(ox + ps * 4 + 2, oy + ps * 4 + 2, ps, 1);
-    // red coat
-    g.fillStyle(C.RED, 1);
-    g.fillRect(ox + ps * 1, oy + ps * 5, ps * 6, ps * 2);
-    g.fillStyle(C.GOLD, 1);
-    g.fillRect(ox + ps * 3 + 1, oy + ps * 5, ps * 2 - 1, ps * 2);
-    // epaulettes
-    g.fillStyle(C.GOLD, 1);
-    g.fillRect(ox + ps, oy + ps * 5, ps + 1, ps - 1);
-    g.fillRect(ox + ps * 6, oy + ps * 5, ps + 1, ps - 1);
-    // whip arm (frame 1 = raised)
-    if (frame === 1) {
-      g.fillStyle(C.BROWN, 1);
-      g.fillRect(ox + ps * 7, oy + ps * 3, ps, ps * 3);
-    }
-    // legs
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 7, ps + 1, ps);
-    g.fillRect(ox + ps * 5 - 1, oy + ps * 7, ps + 1, ps);
-    if (frame === 2) {
-      g.fillStyle(C.WHITE, 0.5);
-      g.fillRect(ox, oy, TS, TS);
-    }
-  },
-
-  // ── ITEMS ──────────────────────────────────────────────────────────────
-
-  generateItems(scene) {
-    const TS = this.TS;
-    const ps = TS / 8;
-    const C = this.C;
-    // Items: hammer, balloon_sword, cream_pie, seltzer, big_shoes, motley_armor, mystery_box, gold
-    const ITEM_NAMES = ['hammer', 'balloon_sword', 'cream_pie', 'seltzer', 'big_shoes', 'motley_armor', 'mystery_box', 'gold'];
-    const W = TS * ITEM_NAMES.length;
-    const g = scene.make.graphics({ x: 0, y: 0, add: false });
-
-    this.drawHammer(g, 0, 0, TS, ps, C);
-    this.drawBalloonSword(g, TS, 0, TS, ps, C);
-    this.drawCreamPie(g, TS * 2, 0, TS, ps, C);
-    this.drawSeltzer(g, TS * 3, 0, TS, ps, C);
-    this.drawBigShoes(g, TS * 4, 0, TS, ps, C);
-    this.drawMotleyArmor(g, TS * 5, 0, TS, ps, C);
-    this.drawMysteryBox(g, TS * 6, 0, TS, ps, C);
-    this.drawGold(g, TS * 7, 0, TS, ps, C);
-
-    g.generateTexture('items', W, TS);
-    g.destroy();
-
-    const tex = scene.textures.get('items');
-    ITEM_NAMES.forEach((n, i) => tex.add(n, 0, i * TS, 0, TS, TS));
-  },
-
-  drawHammer(g, ox, oy, TS, ps, C) {
-    g.fillStyle(C.BROWN, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 2, ps * 2, ps * 6);
-    g.fillStyle(C.GRAY, 1);
-    g.fillRect(ox + ps, oy + ps, ps * 6, ps * 3);
-    g.fillStyle(C.GRAY2, 1);
-    g.fillRect(ox + ps + 1, oy + ps + 1, ps * 6 - 2, ps);
-    g.fillStyle(C.RED, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 2, ps, ps);
-    g.fillRect(ox + ps * 5, oy + ps * 2, ps, ps);
-  },
-
-  drawBalloonSword(g, ox, oy, TS, ps, C) {
-    // balloon segments making a sword
-    g.fillStyle(C.BALLOON_R, 1);
-    g.fillRect(ox + ps * 3, oy + ps, ps * 2, ps * 3);
-    g.fillStyle(C.BALLOON_B, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 4, ps * 2, ps * 2);
-    // guard
-    g.fillStyle(C.BALLOON_Y, 1);
-    g.fillRect(ox + ps, oy + ps * 4, ps * 6, ps);
-    // tip
-    g.fillStyle(C.BALLOON_G, 1);
-    g.fillRect(ox + ps * 3 + 2, oy, ps - 2, ps);
-    // knot handle
-    g.fillStyle(C.BALLOON_R, 0.7);
-    g.fillRect(ox + ps * 3, oy + ps * 6, ps * 2, ps * 2);
-  },
-
-  drawCreamPie(g, ox, oy, TS, ps, C) {
-    // pie tin
-    g.fillStyle(C.GRAY, 1);
-    g.fillRect(ox + ps, oy + ps * 5, ps * 6, ps * 2);
-    // cream
-    g.fillStyle(C.WHITE, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 2, ps * 4, ps * 4);
-    g.fillRect(ox + ps, oy + ps * 3, ps * 6, ps * 3);
-    // peak
-    g.fillRect(ox + ps * 3, oy + ps, ps * 2, ps * 2);
-    g.fillRect(ox + ps * 3 + 1, oy, ps, ps);
-    // cherry
-    g.fillStyle(C.RED2, 1);
-    g.fillRect(ox + ps * 3 + 1, oy + ps, ps, ps);
-  },
-
-  drawSeltzer(g, ox, oy, TS, ps, C) {
-    // bottle
-    g.fillStyle(C.CYAN, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 3, ps * 4, ps * 5);
+    // shoulders
+    pc.rect(cx - 14, 42, 28, 14, opt.suit);
+    pc.rect(cx - 14, 42, 28, 2, opt.suitDk);
+    pc.rect(cx - 2, 44, 4, 12, opt.accent);
     // neck
-    g.fillStyle(C.CYAN, 0.8);
-    g.fillRect(ox + ps * 3, oy + ps * 2, ps * 2, ps * 2);
-    // nozzle
-    g.fillStyle(C.GRAY, 1);
-    g.fillRect(ox + ps * 3 + 1, oy + ps, ps, ps * 2);
-    // label
-    g.fillStyle(C.WHITE, 0.8);
-    g.fillRect(ox + ps * 2 + 1, oy + ps * 4, ps * 4 - 2, ps * 2);
-    g.fillStyle(C.BLUE, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 4 + 2, ps * 2, ps - 2);
-    // shine
-    g.fillStyle(C.WHITE, 0.6);
-    g.fillRect(ox + ps * 5, oy + ps * 3, ps, ps * 2);
-  },
-
-  drawBigShoes(g, ox, oy, TS, ps, C) {
-    g.fillStyle(C.RED, 1);
-    g.fillRect(ox, oy + ps * 4, TS, ps * 4);
-    // round toe
-    g.fillStyle(C.RED2, 1);
-    g.fillRect(ox + ps * 5, oy + ps * 3, ps * 3, ps * 4);
-    // sole
-    g.fillStyle(C.BLACK, 1);
-    g.fillRect(ox, oy + ps * 7, TS, ps);
-    // laces
-    g.fillStyle(C.WHITE, 1);
-    g.fillRect(ox + ps * 1, oy + ps * 4, ps * 4, ps);
-    g.fillRect(ox + ps * 2, oy + ps * 5, ps * 2, ps);
-    g.fillStyle(C.YELLOW, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 4 + 2, ps, 3);
-    g.fillRect(ox + ps * 4, oy + ps * 4 + 2, ps, 3);
-  },
-
-  drawMotleyArmor(g, ox, oy, TS, ps, C) {
-    // chest base
-    g.fillStyle(C.RED, 1);
-    g.fillRect(ox + ps, oy + ps, ps * 6, ps * 6);
-    // diamond patches
-    g.fillStyle(C.YELLOW, 0.9);
-    g.fillRect(ox + ps * 2, oy + ps * 2, ps * 2, ps * 2);
-    g.fillRect(ox + ps * 5, oy + ps * 4, ps * 2, ps * 2);
-    g.fillStyle(C.GREEN2, 0.9);
-    g.fillRect(ox + ps * 4, oy + ps * 2, ps * 2, ps * 2);
-    g.fillRect(ox + ps * 2, oy + ps * 5, ps * 2, ps);
-    // shoulder bells
-    g.fillStyle(C.GOLD, 1);
-    g.fillRect(ox, oy + ps, ps * 2, ps * 2);
-    g.fillRect(ox + ps * 6, oy + ps, ps * 2, ps * 2);
-    // collar
-    g.fillStyle(C.WHITE, 1);
-    g.fillRect(ox + ps * 2, oy + ps, ps * 4, ps);
-  },
-
-  drawMysteryBox(g, ox, oy, TS, ps, C) {
-    // box
-    g.fillStyle(C.PURPLE, 1);
-    g.fillRect(ox + ps, oy + ps * 2, ps * 6, ps * 5);
-    // question mark face
-    g.fillStyle(C.YELLOW, 1);
-    g.fillRect(ox + ps * 3, oy + ps * 3, ps * 2, ps);
-    g.fillRect(ox + ps * 4, oy + ps * 3, ps, ps);
-    g.fillRect(ox + ps * 4, oy + ps * 4, ps, ps);
-    g.fillRect(ox + ps * 3, oy + ps * 5, ps, ps);
-    g.fillRect(ox + ps * 3, oy + ps * 6, ps, ps);
-    // lid
-    g.fillStyle(C.PURPLE2, 1);
-    g.fillRect(ox, oy + ps * 2, TS, ps);
-    // ribbon
-    g.fillStyle(C.BALLOON_R, 1);
-    g.fillRect(ox + ps * 3 + 1, oy + ps * 2, ps * 2, ps * 5);
-    g.fillStyle(C.BALLOON_R, 1);
-    g.fillRect(ox + ps, oy + ps * 3, ps * 6, ps);
-  },
-
-  drawGold(g, ox, oy, TS, ps, C) {
-    g.fillStyle(C.GOLD, 1);
-    g.fillRect(ox + ps * 2, oy + ps * 2, ps * 4, ps * 4);
-    g.fillStyle(C.YELLOW, 1);
-    g.fillRect(ox + ps * 3, oy + ps, ps * 2, ps * 6);
-    g.fillRect(ox + ps, oy + ps * 3, ps * 6, ps * 2);
-    g.fillStyle(C.ORANGE, 0.6);
-    g.fillRect(ox + ps * 3, oy + ps * 3, ps * 2, ps * 2);
-    // shine
-    g.fillStyle(C.WHITE, 0.8);
-    g.fillRect(ox + ps * 5, oy + ps * 2, ps, ps);
-  },
-
-  // ── EFFECTS ────────────────────────────────────────────────────────────
-
-  generateEffects(scene) {
-    const TS = this.TS;
-    const ps = TS / 8;
-    const C = this.C;
-    const g = scene.make.graphics({ x: 0, y: 0, add: false });
-
-    // 4 effects: hit, heal, death, level_up
-    const W = TS * 4;
-    // hit
-    g.fillStyle(C.RED2, 0.9);
-    g.fillRect(0, 0, TS, TS);
-    g.fillStyle(C.YELLOW, 1);
-    g.fillRect(ps, ps, ps, ps);
-    g.fillRect(ps * 3, 0, ps * 2, ps * 2);
-    g.fillRect(ps * 6, ps, ps, ps);
-    g.fillRect(ps * 3, ps * 6, ps * 2, ps * 2);
-    g.fillRect(0, ps * 3, ps * 2, ps * 2);
-    g.fillRect(ps * 6, ps * 3, ps * 2, ps * 2);
-    // heal
-    g.fillStyle(C.GREEN2, 0.9);
-    g.fillRect(TS, 0, TS, TS);
-    g.fillStyle(C.WHITE, 0.9);
-    g.fillRect(TS + ps * 3, ps, ps * 2, ps * 6);
-    g.fillRect(TS + ps, ps * 3, ps * 6, ps * 2);
-    // death
-    g.fillStyle(C.BLOOD, 0.9);
-    g.fillRect(TS * 2, 0, TS, TS);
-    g.fillStyle(C.BLACK, 0.7);
-    g.fillRect(TS * 2, 0, TS, TS);
-    g.fillStyle(C.RED, 0.6);
-    for (let i = 0; i < 5; i++) {
-      g.fillRect(TS * 2 + ps * i, ps * (i % 3), ps, ps * 2);
+    pc.rect(cx - 4, 38, 8, 5, opt.skinDk);
+    // head
+    pc.rect(cx - 9, 16, 18, 22, opt.skin);
+    pc.rect(cx + 6, 16, 3, 22, opt.skinDk); // shade side
+    pc.rect(cx - 9, 16, 18, 2, opt.skinDk);
+    // cheeks
+    pc.px(cx - 7, 30, opt.accent); pc.px(cx + 6, 30, opt.accent);
+    // eyes / visor
+    if (opt.visor) {
+      pc.rect(cx - 9, 24, 18, 5, PAL.ink);
+      pc.rect(cx - 7, 25, 5, 2, opt.visor);
+      pc.rect(cx + 2, 25, 5, 2, opt.visor);
+      pc.rect(cx - 7, 25, 5, 1, PAL.white);
+    } else {
+      pc.rect(cx - 7, 25, 4, 4, PAL.white);
+      pc.rect(cx + 3, 25, 4, 4, PAL.white);
+      pc.rect(cx - 6, 26, 2, 2, opt.eye || PAL.ink);
+      pc.rect(cx + 4, 26, 2, 2, opt.eye || PAL.ink);
+      // mouth / smile
+      pc.hline(cx - 3, cx + 2, 34, opt.skinDk);
+      pc.px(cx - 4, 33, opt.skinDk); pc.px(cx + 3, 33, opt.skinDk);
     }
-    // level up
-    g.fillStyle(C.YELLOW, 1);
-    g.fillRect(TS * 3, 0, TS, TS);
-    g.fillStyle(C.GOLD, 0.8);
-    g.fillRect(TS * 3 + ps * 2, ps, ps * 4, ps * 6);
-    g.fillRect(TS * 3 + ps, ps * 3, ps * 6, ps * 2);
-    g.fillStyle(C.WHITE, 0.9);
-    g.fillRect(TS * 3 + ps * 3, 0, ps * 2, ps * 2);
-
-    g.generateTexture('effects', W, TS);
-    g.destroy();
-
-    const tex = scene.textures.get('effects');
-    ['hit', 'heal', 'death', 'levelup'].forEach((n, i) => {
-      tex.add(n, 0, i * TS, 0, TS, TS);
-    });
+    // headgear (scaled-up variants)
+    this._portraitHead(pc, cx, opt);
+    pc.toTexture(scene, key);
   },
 
-  // ── UI ELEMENTS ────────────────────────────────────────────────────────
+  _portraitHead(pc, cx, opt) {
+    if (opt.hairStyle === 'spike') {
+      pc.rect(cx - 9, 10, 18, 8, opt.hair);
+      pc.rect(cx - 9, 10, 18, 2, opt.hairDk);
+      for (let i = -8; i <= 8; i += 4) {
+        pc.rect(cx + i, 4, 2, 7, opt.hair);
+        pc.px(cx + i, 3, opt.hair);
+      }
+      pc.rect(cx - 9, 16, 3, 4, opt.hair);
+      pc.rect(cx + 6, 16, 3, 4, opt.hair);
+    } else if (opt.hairStyle === 'helmet') {
+      pc.rect(cx - 11, 8, 22, 10, opt.suit);
+      pc.rect(cx - 11, 8, 22, 3, opt.accent);
+      pc.rect(cx - 11, 16, 22, 2, opt.suitDk);
+      pc.rect(cx - 2, 4, 4, 6, opt.accent); // crest
+      pc.rect(cx - 12, 12, 2, 6, opt.accent);
+      pc.rect(cx + 10, 12, 2, 6, opt.accent);
+    } else if (opt.hairStyle === 'hood') {
+      pc.rect(cx - 11, 8, 22, 9, opt.suit);
+      // petals
+      for (let i = -9; i <= 9; i += 6) {
+        pc.disc(cx + i, 8, 3, opt.accent);
+        pc.disc(cx + i, 8, 1, PAL.white);
+      }
+      pc.disc(cx, 4, 3, opt.accent);
+      pc.rect(cx - 11, 15, 22, 2, opt.suitDk);
+      pc.rect(cx - 11, 16, 3, 8, opt.hair);
+      pc.rect(cx + 8, 16, 3, 8, opt.hair);
+    }
+  },
 
-  generateUI(scene) {
-    const g = scene.make.graphics({ x: 0, y: 0, add: false });
-    const C = this.C;
-    const bs = 60; // button size
+  // ---- ENEMY BOTS ----
+  bot(scene, key, variant) {
+    const w = 24, h = 30;
+    const pc = new PixelCanvas(w, h);
+    const cx = 12;
+    const heavy = variant === 'heavy';
+    const base = heavy ? PAL.redDk : PAL.iron;
+    const trim = heavy ? PAL.orange : PAL.red;
+    pc.shadow(cx, 27, heavy ? 9 : 7, 3, 'rgba(0,0,0,0.30)');
+    // legs / hover
+    if (heavy) {
+      pc.rect(cx - 6, 24, 12, 3, PAL.steelDk);
+      pc.disc(cx - 5, 26, 2, trim);
+      pc.disc(cx + 4, 26, 2, trim);
+    } else {
+      pc.rect(cx - 3, 22, 2, 5, PAL.steelDk);
+      pc.rect(cx + 1, 22, 2, 5, PAL.steelDk);
+      pc.rect(cx - 4, 26, 3, 2, PAL.ink);
+      pc.rect(cx + 1, 26, 3, 2, PAL.ink);
+    }
+    // body
+    const bw = heavy ? 8 : 5;
+    pc.rect(cx - bw, 12, bw * 2, 11, base);
+    pc.rect(cx - bw, 12, bw * 2, 2, PAL.steel);
+    pc.rect(cx - 1, 14, 2, 7, PAL.ink);
+    pc.rect(cx - 1, 15, 2, 2, trim); // core light
+    // arms / cannons
+    pc.rect(cx - bw - 2, 13, 2, 7, base);
+    pc.rect(cx + bw, 13, 2, 7, base);
+    pc.rect(cx + bw, 18, 3, 2, trim); // muzzle
+    // head
+    pc.rect(cx - 4, 5, 8, 7, PAL.steelDk);
+    pc.rect(cx - 4, 5, 8, 1, PAL.steel);
+    pc.rect(cx - 3, 7, 6, 2, PAL.ink);
+    pc.rect(cx - 3, 7, 6, 1, trim); // visor
+    pc.px(cx - 2, 8, PAL.white);
+    // antenna
+    pc.vline(cx, 2, 4, PAL.steel);
+    pc.px(cx, 1, trim);
+    pc.toTexture(scene, key);
+  },
 
-    // D-pad buttons: up, down, left, right, wait (center)
-    const buttons = [
-      { name: 'btn_up',    x: bs,       y: 0,        w: bs, h: bs },
-      { name: 'btn_down',  x: bs,       y: bs * 2,   w: bs, h: bs },
-      { name: 'btn_left',  x: 0,        y: bs,       w: bs, h: bs },
-      { name: 'btn_right', x: bs * 2,   y: bs,       w: bs, h: bs },
-      { name: 'btn_wait',  x: bs,       y: bs,       w: bs, h: bs },
-    ];
+  // ---- PROJECTILES / FX ----
+  bolt(scene, key, color) {
+    const pc = new PixelCanvas(10, 6);
+    pc.rect(1, 2, 7, 2, color);
+    pc.rect(0, 2, 1, 2, PAL.white);
+    pc.px(8, 1, color); pc.px(8, 4, color);
+    pc.rect(2, 1, 4, 1, PAL.white);
+    pc.toTexture(scene, key);
+  },
+  orb(scene, key, color) {
+    const pc = new PixelCanvas(10, 10);
+    pc.disc(5, 5, 4, color);
+    pc.disc(5, 5, 2, PAL.white);
+    pc.ring(5, 5, 4, color);
+    pc.toTexture(scene, key);
+  },
+  spark(scene, key, color) {
+    const pc = new PixelCanvas(6, 6);
+    pc.rect(2, 2, 2, 2, PAL.white);
+    pc.px(0, 0, color); pc.px(5, 0, color);
+    pc.px(0, 5, color); pc.px(5, 5, color);
+    pc.toTexture(scene, key);
+  },
+  barrier(scene, key, color) {
+    const w = 40, h = 48;
+    const pc = new PixelCanvas(w, h);
+    // hex-energy shield
+    for (let y = 4; y < h - 4; y += 1) {
+      const t = (y - 4) / (h - 8);
+      const span = Math.round(16 * Math.sin(t * Math.PI) + 2);
+      pc.px(20 - span, y, color);
+      pc.px(20 + span, y, color);
+      if (y % 4 === 0) pc.hline(20 - span, 20 + span, y, `rgba(${this._rgb(color)},0.18)`);
+    }
+    pc.toTexture(scene, key);
+  },
 
-    buttons.forEach(b => {
-      // button bg
-      g.fillStyle(C.DARK, 0.85);
-      g.fillRect(b.x + 2, b.y + 2, b.w - 4, b.h - 4);
-      g.fillStyle(C.STONE, 0.6);
-      g.fillRect(b.x + 4, b.y + 4, b.w - 8, b.h - 8);
-      // border
-      g.lineStyle(2, C.PURPLE2, 0.8);
-      g.strokeRect(b.x + 2, b.y + 2, b.w - 4, b.h - 4);
-    });
+  // ---- UI ICONS ----
+  icon(scene, key, type, color) {
+    const pc = new PixelCanvas(16, 16);
+    const c = color, w = PAL.white;
+    if (type === 'dash') {
+      for (let i = 0; i < 3; i++) {
+        pc.rect(2 + i * 4, 6, 2, 4, c);
+        pc.px(4 + i * 4, 5, c); pc.px(4 + i * 4, 10, c);
+      }
+      pc.rect(12, 7, 2, 2, w);
+    } else if (type === 'burst') {
+      pc.disc(8, 8, 3, c);
+      for (let a = 0; a < 360; a += 45) {
+        const r = a * Math.PI / 180;
+        pc.rect(8 + Math.round(Math.cos(r) * 5) - 1, 8 + Math.round(Math.sin(r) * 5) - 1, 2, 2, c);
+      }
+      pc.disc(8, 8, 1, w);
+    } else if (type === 'shield') {
+      for (let y = 2; y < 13; y++) {
+        const t = y / 13;
+        const span = Math.round(6 * (1 - t * 0.6));
+        pc.hline(8 - span, 8 + span, y, y < 4 ? c : (y < 11 ? c : PAL.ink));
+      }
+      pc.rect(6, 6, 4, 1, w);
+    } else if (type === 'slam') {
+      pc.rect(5, 2, 6, 6, c);
+      pc.rect(6, 8, 4, 2, c);
+      pc.hline(2, 13, 12, c);
+      pc.px(2, 11, c); pc.px(13, 11, c);
+      pc.px(0, 13, w); pc.px(15, 13, w);
+    } else if (type === 'heal') {
+      pc.rect(6, 2, 4, 12, c);
+      pc.rect(2, 6, 12, 4, c);
+      pc.rect(7, 3, 2, 10, w);
+      pc.rect(3, 7, 10, 2, w);
+    } else if (type === 'nova') {
+      pc.ring(8, 8, 6, c);
+      pc.ring(8, 8, 4, c);
+      pc.disc(8, 8, 2, w);
+    } else if (type === 'fire') {
+      pc.disc(8, 9, 4, c);
+      pc.rect(7, 2, 2, 6, c);
+      pc.px(6, 4, c); pc.px(9, 4, c);
+      pc.disc(8, 9, 1, w);
+    } else if (type === 'ult') {
+      // star
+      for (let a = 0; a < 360; a += 72) {
+        const r = a * Math.PI / 180;
+        pc.rect(8 + Math.round(Math.cos(r) * 6) - 1, 8 + Math.round(Math.sin(r) * 6) - 1, 2, 2, c);
+      }
+      pc.disc(8, 8, 3, c);
+      pc.disc(8, 8, 1, w);
+    }
+    pc.toTexture(scene, key);
+  },
 
-    // Arrows
-    const mid = bs / 2;
-    const arr = 14;
-    // up arrow
-    g.fillStyle(C.VIOLET, 1);
-    g.fillTriangle(bs + mid, 8, bs + mid - arr, bs - 12, bs + mid + arr, bs - 12);
-    // down arrow
-    g.fillStyle(C.VIOLET, 1);
-    g.fillTriangle(bs + mid, bs * 3 - 8, bs + mid - arr, bs * 2 + 12, bs + mid + arr, bs * 2 + 12);
-    // left arrow
-    g.fillStyle(C.VIOLET, 1);
-    g.fillTriangle(8, bs + mid, bs - 12, bs + mid - arr, bs - 12, bs + mid + arr);
-    // right arrow
-    g.fillStyle(C.VIOLET, 1);
-    g.fillTriangle(bs * 3 - 8, bs + mid, bs * 2 + 12, bs + mid - arr, bs * 2 + 12, bs + mid + arr);
-    // wait (hourglass)
-    g.fillStyle(C.TAN, 1);
-    g.fillTriangle(bs + mid, bs + mid, bs + 10, bs + 10, bs + bs - 10, bs + 10);
-    g.fillTriangle(bs + mid, bs + mid, bs + 10, bs * 2 - 10, bs + bs - 10, bs * 2 - 10);
+  roleBadge(scene, key, role, color) {
+    const pc = new PixelCanvas(18, 18);
+    pc.disc(9, 9, 8, PAL.ink);
+    pc.ring(9, 9, 8, color);
+    const c = color, w = PAL.white;
+    if (role === 'Damage') {
+      // crosshair / arrow
+      pc.disc(9, 9, 5, 'rgba(0,0,0,0)');
+      pc.ring(9, 9, 4, c);
+      pc.vline(9, 4, 14, c); pc.hline(4, 14, 9, c);
+      pc.disc(9, 9, 1, w);
+    } else if (role === 'Tank') {
+      for (let y = 4; y < 14; y++) {
+        const t = (y - 4) / 10;
+        const span = Math.round(5 * (1 - t * 0.7));
+        pc.hline(9 - span, 9 + span, y, c);
+      }
+      pc.rect(6, 7, 6, 2, w);
+    } else if (role === 'Support') {
+      pc.rect(7, 4, 4, 10, c);
+      pc.rect(4, 7, 10, 4, c);
+      pc.rect(8, 5, 2, 8, w);
+      pc.rect(5, 8, 8, 2, w);
+    }
+    pc.toTexture(scene, key);
+  },
 
-    g.generateTexture('dpad', bs * 3, bs * 3);
-    g.destroy();
+  // helper: hex -> "r,g,b"
+  _rgb(hex) {
+    const h = hex.replace('#', '');
+    return [parseInt(h.substr(0, 2), 16), parseInt(h.substr(2, 2), 16), parseInt(h.substr(4, 2), 16)].join(',');
   },
 };

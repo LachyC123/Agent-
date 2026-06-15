@@ -1,736 +1,673 @@
-const ITEM_DATA = {
-  hammer:       { subtype: 'weapon',    atk: 4,  name: 'Squeaky Hammer',   desc: 'ATK +4'  },
-  balloon_sword:{ subtype: 'weapon',    atk: 7,  name: 'Balloon Sword',    desc: 'ATK +7'  },
-  big_shoes:    { subtype: 'armor',     def: 3,  name: 'Big Shoes',        desc: 'DEF +3'  },
-  motley_armor: { subtype: 'armor',     def: 6,  name: 'Motley Armor',     desc: 'DEF +6'  },
-  cream_pie:    { subtype: 'consumable',heal: 0, name: 'Cream Pie',        desc: 'Stun foe'},
-  seltzer:      { subtype: 'consumable',heal: 15,name: 'Seltzer Bottle',   desc: 'Heal 15' },
-  mystery_box:  { subtype: 'consumable',heal: 0, name: 'Mystery Box',      desc: '???'     },
-  gold:         { subtype: 'gold',                name: 'Gold Coins',       desc: ''        },
-};
+// GameScene — isometric payload escort vs AI bots.
+const GRID_W = 20, GRID_H = 14;
 
 class GameScene extends Phaser.Scene {
-  constructor() { super({ key: 'GameScene' }); }
+  constructor() { super('Game'); }
 
-  init(data) {
-    this.floorNum  = data.floor  || 1;
-    this.seed      = data.seed   || 1337;
-    this.playerData = data.playerData || null;
-  }
+  init(data) { this.heroId = (data && data.heroId) || 'zap'; }
 
   create() {
-    this.TS = SpriteGen.TS; // tile size
-    this.MAP_W = 48;
-    this.MAP_H = 48;
+    Iso.setOrigin(520, 120);
+    this.units = [];
+    this.bolts = [];
+    this.barriers = [];
+    this.fx = [];
+    this.firing = false;
+    this.moveVec = { x: 0, y: 0 };
+    this.gameOver = false;
+    this.matchTime = 120000; // 2 minutes to escort
 
-    // State
-    this.turnCount  = 0;
-    this.gameOver   = false;
-    this.animating  = false;
-    this.messages   = [];
+    this.buildMap();
+    this.spawnPayload();
+    this.spawnTeams();
 
-    // Fog of war — 0=unseen, 1=seen(dark), 2=visible
-    this.fog = Array.from({ length: this.MAP_H }, () => Array(this.MAP_W).fill(0));
+    // depth-sorted dynamic layer handled per-update
+    this.barG = this.add.graphics().setDepth(60000); // health bars overlay
+    this.aimLine = this.add.graphics().setDepth(59000);
 
-    this._buildDungeon();
-    this._buildPlayer();
-    this._buildTilemap();
-    this._buildEntities();
-    this._setupCamera();
-    this._setupInput();
+    this.cameras.main.startFollow(this.player.sprite, true, 0.1, 0.1);
+    this.cameras.main.setZoom(1.05);
+    this.cameras.main.fadeIn(300, 0, 0, 0);
 
-    // Start UI overlay
-    this.scene.launch('UIScene', { gameScene: this });
-    this.uiScene = this.scene.get('UIScene');
+    this.enemySpawnTimer = 0;
 
-    // Fade in
-    this.cameras.main.fadeIn(400, 0, 0, 0);
-
-    // Compute initial FOV
-    this._computeFOV();
-    this._refreshTiles();
-    this._addMessage(this._floorMessage());
+    // launch HUD
+    this.scene.launch('UI', { heroId: this.heroId });
+    this.uiScene = this.scene.get('UI');
   }
 
-  _floorMessage() {
-    const msgs = [
-      `Floor ${this.floorNum} — the laughter echoes...`,
-      `Floor ${this.floorNum} — something giggles in the dark.`,
-      `Floor ${this.floorNum} — the circus goes deeper.`,
-      `Floor ${this.floorNum} — you smell greasepaint and blood.`,
-      `Floor ${this.floorNum} — the clowns are watching.`,
-    ];
-    if (this.floorNum % 5 === 0) return `⚠ Floor ${this.floorNum} — THE RINGMASTER AWAITS.`;
-    return msgs[(this.floorNum - 1) % msgs.length];
+  // ---------- MAP ----------
+  buildMap() {
+    this.grid = [];
+    for (let y = 0; y < GRID_H; y++) {
+      this.grid[y] = [];
+      for (let x = 0; x < GRID_W; x++) {
+        const border = x === 0 || y === 0 || x === GRID_W - 1 || y === GRID_H - 1;
+        this.grid[y][x] = border ? 1 : 0;
+      }
+    }
+    // cover blocks
+    [[6, 4], [6, 5], [13, 9], [13, 10], [9, 3], [10, 11], [4, 10], [15, 4]].forEach(([x, y]) => this.grid[y][x] = 1);
+
+    // payload path waypoints (grid coords, all on floor)
+    this.path = [[2, 7], [6, 7], [10, 5], [14, 9], [17, 7]];
+
+    this.tileLayer = this.add.group();
+    for (let y = 0; y < GRID_H; y++) {
+      for (let x = 0; x < GRID_W; x++) {
+        const onPath = this.path.some(p => Math.abs(p[0] - x) + Math.abs(p[1] - y) <= 1);
+        let key = 'tileFloor';
+        if (this.grid[y][x] === 1) key = 'wall';
+        else if (onPath) key = 'tilePath';
+        const s = this.placeIso(key, x, y, this.grid[y][x] === 1 ? 5 : 0);
+        if (this.grid[y][x] === 1) s.setOrigin(0.5, 0.78);
+      }
+    }
+    // spawn pads
+    this.placeIso('tileAlly', 2, 7, 1);
+    this.placeIso('tileEnemy', 17, 7, 1);
+
+    // objective markers along the path
+    this.path.forEach(p => this.placeIso('tileObjective', p[0], p[1], 1).setAlpha(0.6));
   }
 
-  // ── BUILD ────────────────────────────────────────────────────────────
-
-  _buildDungeon() {
-    const gen = new DungeonGenerator(this.MAP_W, this.MAP_H);
-    this.dungeon = gen.generate(this.floorNum, this.seed);
+  placeIso(key, gx, gy, bias) {
+    const p = Iso.toScreen(gx, gy);
+    const s = this.add.image(p.x, p.y, key).setOrigin(0.5, 0.5);
+    s.setDepth((gx + gy) * 10 + (bias || 0));
+    return s;
   }
 
-  _buildPlayer() {
-    const { x, y } = this.dungeon.playerStart;
-    const base = this.playerData
-      ? { ...this.playerData }
-      : { hp: 30, maxHp: 30, baseAtk: 3, baseDef: 1, weapon: null, armor: null, inventory: [], xp: 0, level: 1, gold: 0 };
-    this.player = Object.assign(base, {
-      x, y,
-      get atk() { return this.baseAtk + (this.weapon ? (ITEM_DATA[this.weapon]?.atk || 0) : 0); },
-      get def() { return this.baseDef + (this.armor  ? (ITEM_DATA[this.armor ]?.def || 0) : 0); },
+  isWall(gx, gy) {
+    const x = Math.round(gx), y = Math.round(gy);
+    if (x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) return true;
+    return this.grid[y][x] === 1;
+  }
+
+  // ---------- PAYLOAD ----------
+  spawnPayload() {
+    const sp = this.path[0];
+    this.payload = {
+      gx: sp[0], gy: sp[1], seg: 0, frac: 0, speed: 1.1,
+      sprite: this.add.image(0, 0, 'payload').setOrigin(0.5, 0.78),
+      progress: 0,
+    };
+  }
+
+  pathLength() { return this.path.length - 1; }
+
+  updatePayload(dt) {
+    const P = this.payload;
+    // count contenders near payload
+    let allies = 0, enemies = 0;
+    this.units.forEach(u => {
+      if (!u.alive) return;
+      const d = this.dist(u.gx, u.gy, P.gx, P.gy);
+      if (d < 2.4) { if (u.team === 'ally') allies++; else enemies++; }
+    });
+    let moving = false;
+    if (allies > 0 && enemies === 0 && P.seg < this.pathLength()) {
+      const a = this.path[P.seg], b = this.path[P.seg + 1];
+      const segLen = this.dist(a[0], a[1], b[0], b[1]);
+      P.frac += (P.speed * dt / 1000) / segLen;
+      moving = true;
+      if (P.frac >= 1) { P.frac = 0; P.seg++; }
+      const aa = this.path[Math.min(P.seg, this.pathLength())];
+      const bb = this.path[Math.min(P.seg + 1, this.pathLength())];
+      P.gx = aa[0] + (bb[0] - aa[0]) * P.frac;
+      P.gy = aa[1] + (bb[1] - aa[1]) * P.frac;
+    }
+    P.progress = (P.seg + P.frac) / this.pathLength();
+    P.contested = allies > 0 && enemies > 0;
+    P.moving = moving;
+
+    const sp = Iso.toScreen(P.gx, P.gy);
+    P.sprite.setPosition(sp.x, sp.y - 6);
+    P.sprite.setDepth((P.gx + P.gy) * 10 + 6);
+
+    if (P.seg >= this.pathLength() && !this.gameOver) this.endMatch(true);
+  }
+
+  // ---------- TEAMS ----------
+  spawnTeams() {
+    const hero = getHero(this.heroId);
+    this.player = this.makeUnit({
+      team: 'ally', hero, gx: 2.5, gy: 7, isPlayer: true,
+    });
+
+    // pick two AI allies from the other heroes
+    const others = HEROES.filter(h => h.id !== this.heroId);
+    this.makeUnit({ team: 'ally', hero: others[0], gx: 2.5, gy: 6 });
+    this.makeUnit({ team: 'ally', hero: others[1], gx: 2.5, gy: 8 });
+
+    // initial enemies
+    for (let i = 0; i < 4; i++) this.spawnEnemy();
+  }
+
+  makeUnit(o) {
+    const hero = o.hero;
+    const isBot = !hero;
+    const sprite = this.add.image(0, 0, isBot ? (o.variant === 'heavy' ? 'bot_heavy' : 'bot_grunt') : 'hero_' + hero.id)
+      .setOrigin(0.5, 0.85).setScale(1.6);
+    const stats = isBot ? o.stats : hero.stats;
+    const u = {
+      team: o.team, hero, isBot, isPlayer: !!o.isPlayer,
+      sprite, gx: o.gx, gy: o.gy, face: o.team === 'ally' ? 1 : -1,
+      hp: stats.hp, maxHp: stats.hp, speed: stats.speed,
+      weapon: isBot ? o.weapon : hero.weapon,
+      fireCd: 0, alive: true, cd: {}, ult: 0,
+      buffs: {}, variant: o.variant,
+      respawn: o.isPlayer ? { gx: 2.5, gy: 7 } : { gx: o.gx, gy: o.gy },
+    };
+    this.units.push(u);
+    return u;
+  }
+
+  spawnEnemy() {
+    const heavy = Math.random() < 0.35;
+    const slot = Math.random() < 0.5 ? 5 : 9;
+    this.makeUnit({
+      team: 'enemy', hero: null, gx: 17, gy: slot, variant: heavy ? 'heavy' : 'grunt',
+      stats: heavy ? { hp: 220, speed: 1.9 } : { hp: 110, speed: 2.6 },
+      weapon: heavy
+        ? { dmg: 11, rate: 320, range: 5.5, spread: 0.06, proj: 'boltRed', auto: true }
+        : { dmg: 7, rate: 240, range: 6, spread: 0.05, proj: 'boltRed', auto: true },
     });
   }
 
-  _buildTilemap() {
-    const TS = this.TS;
-    const { tiles, width, height } = this.dungeon;
+  // ---------- MAIN LOOP ----------
+  update(time, dt) {
+    if (this.gameOver) return;
+    this.matchTime -= dt;
+    if (this.matchTime <= 0) { this.endMatch(false); return; }
 
-    // Ground layer — one image per tile (pooled via containers)
-    this.tileLayer = this.add.container(0, 0);
-    this.tileSprites = [];
+    this.updatePlayer(dt);
+    this.units.forEach(u => { if (!u.isPlayer) this.updateAI(u, dt); });
+    this.units.forEach(u => this.updateUnitCommon(u, dt));
+    this.updatePayload(dt);
+    this.updateBolts(dt);
+    this.updateBarriers(dt);
 
-    for (let ty = 0; ty < height; ty++) {
-      this.tileSprites[ty] = [];
-      for (let tx = 0; tx < width; tx++) {
-        const img = this.add.image(tx * TS + TS / 2, ty * TS + TS / 2, 'tiles', 'void');
-        img.setDepth(0);
-        this.tileLayer.add(img);
-        this.tileSprites[ty][tx] = img;
-      }
+    // keep enemy pressure up
+    this.enemySpawnTimer -= dt;
+    const aliveEnemies = this.units.filter(u => u.team === 'enemy' && u.alive).length;
+    if (this.enemySpawnTimer <= 0 && aliveEnemies < 5) {
+      this.spawnEnemy();
+      this.enemySpawnTimer = 4000;
     }
 
-    // Fog overlay layer
-    this.fogSprites = [];
-    this.fogLayer = this.add.container(0, 0);
-    for (let ty = 0; ty < height; ty++) {
-      this.fogSprites[ty] = [];
-      for (let tx = 0; tx < width; tx++) {
-        const fog = this.add.rectangle(tx * TS + TS / 2, ty * TS + TS / 2, TS, TS, 0x000000, 1);
-        fog.setDepth(5);
-        this.fogLayer.add(fog);
-        this.fogSprites[ty][tx] = fog;
-      }
+    this.drawBars();
+  }
+
+  updateUnitCommon(u, dt) {
+    // expire buffs
+    for (const k in u.buffs) if (u.buffs[k] <= time_now()) delete u.buffs[k];
+    // position + depth + facing
+    const sp = Iso.toScreen(u.gx, u.gy);
+    u.sprite.setPosition(sp.x, sp.y);
+    u.sprite.setDepth((u.gx + u.gy) * 10 + 6);
+    u.sprite.setFlipX(u.face < 0);
+    u.sprite.setVisible(u.alive);
+    // ult tint for player rampage / invuln
+    if (u.buffs.rampage) u.sprite.setTint(0xff66ff);
+    else if (u.buffs.invuln) u.sprite.setTint(0xffe066);
+    else u.sprite.clearTint();
+  }
+
+  effSpeed(u) {
+    let s = u.speed;
+    if (u.buffs.haste) s *= 1.5;
+    return s;
+  }
+
+  // ---------- PLAYER ----------
+  updatePlayer(dt) {
+    const u = this.player;
+    if (!u.alive) return;
+    const mv = this.moveVec;
+    const mag = Math.hypot(mv.x, mv.y);
+    if (mag > 0.12) {
+      const nx = mv.x / mag, ny = mv.y / mag;
+      this.moveUnit(u, nx, ny, dt);
+      u.face = nx < -0.05 ? -1 : (nx > 0.05 ? 1 : u.face);
+      u.moveDir = { x: nx, y: ny };
     }
+    // firing
+    u.fireCd -= dt;
+    if (this.firing && u.fireCd <= 0) this.fireWeapon(u);
   }
 
-  _tileFrame(t) {
-    return ['void', 'floor', 'wall', 'door', 'stairs', 'torch', 'blood', 'barrel', 'floor2'][t] || 'void';
-  }
+  // ---------- AI ----------
+  updateAI(u, dt) {
+    if (!u.alive) return;
+    u.fireCd -= dt;
+    const target = this.nearestEnemy(u);
+    let goalX, goalY;
 
-  _buildEntities() {
-    const TS = this.TS;
-    this.entities = []; // enemies + items
-    this.entitySprites = new Map(); // entity -> sprite
-
-    this.dungeon.entities.forEach(ent => {
-      const e = { ...ent };
-      this.entities.push(e);
-
-      if (e.kind === 'enemy') {
-        const spr = this.add.sprite(e.x * TS + TS / 2, e.y * TS + TS / 2, 'enemies', `${e.type}_0`);
-        spr.setDepth(3);
-        spr.setScale(1);
-        spr.play(`${e.type}-walk`);
-        this.entitySprites.set(e, spr);
-      } else {
-        const frame = e.type === 'gold' ? 'gold' : e.type;
-        const spr = this.add.image(e.x * TS + TS / 2, e.y * TS + TS / 2, 'items', frame);
-        spr.setDepth(2);
-        this.entitySprites.set(e, spr);
-        this.tweens.add({ targets: spr, y: spr.y - 3, duration: 900, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
-      }
-    });
-
-    // Player sprite
-    this.playerSprite = this.add.sprite(
-      this.player.x * TS + TS / 2,
-      this.player.y * TS + TS / 2,
-      'player', 'idle'
-    ).setDepth(4).setScale(1);
-    this.playerSprite.play('player-idle');
-  }
-
-  _setupCamera() {
-    const TS = this.TS;
-    const W = this.MAP_W * TS, H = this.MAP_H * TS;
-    this.cameras.main.setBounds(0, 0, W, H);
-    this.cameras.main.setViewport(0, 0, this.scale.width, this.scale.height - 160);
-    this.cameras.main.startFollow(this.playerSprite, true, 0.12, 0.12);
-    this.cameras.main.setZoom(1);
-  }
-
-  _setupInput() {
-    // Keyboard
-    this.cursors = this.input.keyboard.createCursorKeys();
-    this.wasd = this.input.keyboard.addKeys({ up: 'W', down: 'S', left: 'A', right: 'D', wait: 'SPACE' });
-
-    this.input.keyboard.on('keydown', e => {
-      if (this.animating || this.gameOver) return;
-      const key = e.key;
-      if (key === 'ArrowUp'    || key === 'w' || key === 'W') this._tryMove(0, -1);
-      if (key === 'ArrowDown'  || key === 's' || key === 'S') this._tryMove(0,  1);
-      if (key === 'ArrowLeft'  || key === 'a' || key === 'A') this._tryMove(-1, 0);
-      if (key === 'ArrowRight' || key === 'd' || key === 'D') this._tryMove( 1, 0);
-      if (key === ' ' || key === '.') this._wait();
-      if (key === 'i' || key === 'I') this._openInventory();
-    });
-
-    // Swipe / touch on game area
-    this.input.on('pointerdown', p => { this._touchStart = { x: p.x, y: p.y }; });
-    this.input.on('pointerup', p => {
-      if (!this._touchStart || this.animating || this.gameOver) return;
-      const dx = p.x - this._touchStart.x;
-      const dy = p.y - this._touchStart.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < 15) { this._wait(); return; }
-      if (Math.abs(dx) > Math.abs(dy)) {
-        this._tryMove(dx > 0 ? 1 : -1, 0);
-      } else {
-        this._tryMove(0, dy > 0 ? 1 : -1);
-      }
-    });
-  }
-
-  // ── MOVEMENT / TURN ──────────────────────────────────────────────────
-
-  _tryMove(dx, dy) {
-    const nx = this.player.x + dx;
-    const ny = this.player.y + dy;
-    const tile = this.dungeon.tiles[ny]?.[nx];
-
-    if (tile === undefined || tile === TILE.VOID || tile === TILE.WALL || tile === TILE.BARREL) return;
-
-    // Check for enemy at target
-    const enemy = this._enemyAt(nx, ny);
-    if (enemy) {
-      this._playerAttack(enemy);
-      return;
-    }
-
-    // Check for item at target
-    const item = this._itemAt(nx, ny);
-
-    // Open door
-    if (tile === TILE.DOOR) {
-      this.dungeon.tiles[ny][nx] = TILE.FLOOR;
-      this.tileSprites[ny][nx].setTexture('tiles', 'floor');
-      this._addMessage('You kick open the door. *HONK*');
-      this._endTurn();
-      return;
-    }
-
-    // Stairs
-    if (tile === TILE.STAIRS) {
-      this._descend();
-      return;
-    }
-
-    // Move player
-    this.player.x = nx;
-    this.player.y = ny;
-    this._animatePlayerMove();
-
-    // Pick up item
-    if (item) this._pickupItem(item);
-
-    this._endTurn();
-  }
-
-  _wait() {
-    this._addMessage('You wait... *squeak*');
-    this._endTurn();
-  }
-
-  _endTurn() {
-    this.turnCount++;
-    this._computeFOV();
-    this._refreshTiles();
-    this._refreshEntityVisibility();
-    this._enemyTurns();
-    this._checkDeath();
-    if (this.uiScene) this.uiScene.refresh();
-  }
-
-  // ── PLAYER MOVEMENT ANIMATION ────────────────────────────────────────
-
-  _animatePlayerMove() {
-    const TS = this.TS;
-    const tx = this.player.x * TS + TS / 2;
-    const ty = this.player.y * TS + TS / 2;
-    this.animating = true;
-    this.playerSprite.play('player-walk');
-    this.tweens.add({
-      targets: this.playerSprite,
-      x: tx, y: ty,
-      duration: 100,
-      ease: 'Linear',
-      onComplete: () => {
-        this.animating = false;
-        this.playerSprite.play('player-idle');
-      }
-    });
-  }
-
-  // ── COMBAT ───────────────────────────────────────────────────────────
-
-  _playerAttack(enemy) {
-    const dmg = Math.max(1, this.player.atk - enemy.def + Math.floor(Math.random() * 3) - 1);
-    const crit = Math.random() < 0.1;
-    const finalDmg = crit ? dmg * 2 : dmg;
-    enemy.hp -= finalDmg;
-
-    const spr = this.entitySprites.get(enemy);
-    const TS = this.TS;
-
-    // Attack animation — lunge
-    const origX = this.playerSprite.x;
-    const origY = this.playerSprite.y;
-    const tx = enemy.x * TS + TS / 2;
-    const ty = enemy.y * TS + TS / 2;
-    const midX = origX + (tx - origX) * 0.5;
-    const midY = origY + (ty - origY) * 0.5;
-
-    this.animating = true;
-    this.playerSprite.play('player-attack', true);
-    this.tweens.add({
-      targets: this.playerSprite,
-      x: midX, y: midY,
-      duration: 60,
-      yoyo: true,
-      onComplete: () => {
-        this.animating = false;
-        this.playerSprite.play('player-idle');
-      }
-    });
-
-    // Hit effect
-    if (spr) {
-      const fx = this.add.image(tx, ty, 'effects', 'hit').setDepth(10).setAlpha(0.8);
-      this.tweens.add({ targets: fx, alpha: 0, scaleX: 1.5, scaleY: 1.5, duration: 300, onComplete: () => fx.destroy() });
-      spr.play(`${enemy.type}-hurt`, true);
-      this.time.delayedCall(400, () => {
-        if (enemy.hp > 0) spr.play(`${enemy.type}-walk`);
-      });
-      // Flash red
-      this.tweens.add({ targets: spr, tint: 0xff4444, duration: 80, yoyo: true, onComplete: () => spr.clearTint() });
-    }
-
-    const critStr = crit ? ' CRITICAL!' : '';
-    this._addMessage(`You hit ${enemy.type} for ${finalDmg} dmg!${critStr}`);
-
-    if (enemy.hp <= 0) {
-      this._killEnemy(enemy);
+    if (u.team === 'ally') {
+      // escort: head to the payload, fight along the way
+      goalX = this.payload.gx; goalY = this.payload.gy;
     } else {
-      this._endTurn();
-    }
-  }
-
-  _killEnemy(enemy) {
-    const spr = this.entitySprites.get(enemy);
-    const TS = this.TS;
-
-    // Death effect
-    const fx = this.add.image(enemy.x * TS + TS / 2, enemy.y * TS + TS / 2, 'effects', 'death').setDepth(10);
-    this.tweens.add({ targets: fx, alpha: 0, scaleX: 2, scaleY: 2, duration: 400, onComplete: () => fx.destroy() });
-
-    if (spr) {
-      this.tweens.add({ targets: spr, alpha: 0, y: spr.y + 8, duration: 300, onComplete: () => spr.destroy() });
+      // enemies: contest payload, prefer attacking a nearby ally
+      goalX = this.payload.gx; goalY = this.payload.gy;
+      if (target && this.dist(u.gx, u.gy, target.gx, target.gy) < 4) { goalX = target.gx; goalY = target.gy; }
     }
 
-    this._addMessage(`${enemy.type} is dead! +${enemy.xp} XP`);
-    this.entities = this.entities.filter(e => e !== enemy);
-    this.entitySprites.delete(enemy);
-
-    // XP + leveling
-    this.player.xp += enemy.xp;
-    const xpNeeded = this.player.level * 30;
-    if (this.player.xp >= xpNeeded) {
-      this.player.xp -= xpNeeded;
-      this.player.level++;
-      this.player.maxHp += 5;
-      this.player.hp = Math.min(this.player.hp + 5, this.player.maxHp);
-      this.player.baseAtk++;
-      const lvFx = this.add.image(this.playerSprite.x, this.playerSprite.y - 12, 'effects', 'levelup').setDepth(12);
-      this.tweens.add({ targets: lvFx, y: lvFx.y - 20, alpha: 0, duration: 800, onComplete: () => lvFx.destroy() });
-      this._addMessage(`LEVEL UP! Now level ${this.player.level}!`);
+    const distGoal = this.dist(u.gx, u.gy, goalX, goalY);
+    const desired = u.team === 'ally' ? 1.6 : 1.4;
+    if (distGoal > desired) {
+      let dx = goalX - u.gx, dy = goalY - u.gy;
+      const m = Math.hypot(dx, dy) || 1;
+      dx /= m; dy /= m;
+      this.moveUnit(u, dx, dy, dt);
+      u.face = dx < 0 ? -1 : 1;
     }
 
-    this._endTurn();
-  }
-
-  _enemyAttack(enemy) {
-    const dmg = Math.max(1, enemy.atk - this.player.def + Math.floor(Math.random() * 3) - 1);
-    this.player.hp -= dmg;
-    this._addMessage(`${enemy.type} hits you for ${dmg}!`);
-
-    // Player hurt flash
-    this.tweens.add({ targets: this.playerSprite, tint: 0xff0000, duration: 100, yoyo: true, onComplete: () => this.playerSprite.clearTint() });
-    this.cameras.main.shake(120, 0.006);
-  }
-
-  // ── ENEMY TURNS ───────────────────────────────────────────────────────
-
-  _enemyTurns() {
-    const visEnemies = this.entities.filter(e => e.kind === 'enemy' && this.fog[e.y]?.[e.x] === 2);
-    visEnemies.forEach(enemy => {
-      if (enemy.stunned > 0) { enemy.stunned--; return; }
-      enemy.ticksSinceMove++;
-      if (enemy.ticksSinceMove < enemy.speed) return;
-      enemy.ticksSinceMove = 0;
-
-      const dist = Math.abs(enemy.x - this.player.x) + Math.abs(enemy.y - this.player.y);
-
-      if (dist === 1) {
-        this._enemyAttack(enemy);
-      } else if (enemy.ranged && dist <= 5) {
-        // Ranged attack
-        const dmg = Math.max(1, Math.floor(enemy.atk * 0.7) - this.player.def);
-        this.player.hp -= dmg;
-        this._addMessage(`${enemy.type} throws something! ${dmg} dmg!`);
-        this.cameras.main.shake(80, 0.004);
-        // Projectile visual
-        const TS = this.TS;
-        const proj = this.add.circle(enemy.x * TS + TS / 2, enemy.y * TS + TS / 2, 4, 0xff6600).setDepth(8);
-        this.tweens.add({
-          targets: proj,
-          x: this.player.x * TS + TS / 2, y: this.player.y * TS + TS / 2,
-          duration: 250,
-          onComplete: () => proj.destroy()
-        });
-      } else {
-        this._moveEnemyToward(enemy);
+    // fire at target in range
+    if (target) {
+      const d = this.dist(u.gx, u.gy, target.gx, target.gy);
+      if (d <= u.weapon.range && u.fireCd <= 0) {
+        u.face = target.gx < u.gx ? -1 : 1;
+        this.fireWeapon(u, target);
       }
+    }
+    // support bot allies: handled via fireWeapon heal logic
+  }
 
-      // Update sprite position
-      const spr = this.entitySprites.get(enemy);
-      if (spr) {
-        const TS = this.TS;
-        this.tweens.add({
-          targets: spr,
-          x: enemy.x * TS + TS / 2, y: enemy.y * TS + TS / 2,
-          duration: 120,
-          ease: 'Linear'
-        });
-        spr.setFlipX(enemy.x < this.player.x ? false : (enemy.x > this.player.x ? true : spr.flipX));
-      }
+  moveUnit(u, nx, ny, dt) {
+    const step = this.effSpeed(u) * dt / 1000;
+    const tx = u.gx + nx * step;
+    const ty = u.gy + ny * step;
+    if (!this.isWall(tx, u.gy)) u.gx = tx;
+    if (!this.isWall(u.gx, ty)) u.gy = ty;
+    u.gx = Phaser.Math.Clamp(u.gx, 0.6, GRID_W - 1.6);
+    u.gy = Phaser.Math.Clamp(u.gy, 0.6, GRID_H - 1.6);
+  }
+
+  // ---------- COMBAT ----------
+  nearestEnemy(u) {
+    let best = null, bd = 1e9;
+    this.units.forEach(o => {
+      if (!o.alive || o.team === u.team) return;
+      const d = this.dist(u.gx, u.gy, o.gx, o.gy);
+      if (d < bd) { bd = d; best = o; }
     });
+    return best;
+  }
+  nearestHurtAlly(u, range) {
+    let best = null, bd = 1e9;
+    this.units.forEach(o => {
+      if (!o.alive || o.team !== u.team || o === u) return;
+      if (o.hp >= o.maxHp) return;
+      const d = this.dist(u.gx, u.gy, o.gx, o.gy);
+      if (d < bd && d <= range) { bd = d; best = o; }
+    });
+    return best;
   }
 
-  _moveEnemyToward(enemy) {
-    // Simple pathfinding: prefer the direction that reduces manhattan distance
-    const dx = this.player.x - enemy.x;
-    const dy = this.player.y - enemy.y;
-    const moves = [];
-    if (dx !== 0) moves.push({ x: Math.sign(dx), y: 0 });
-    if (dy !== 0) moves.push({ x: 0, y: Math.sign(dy) });
-    // Try perpendicular if stuck
-    moves.push({ x: Math.sign(dx) || 1, y: 0 }, { x: 0, y: Math.sign(dy) || 1 });
-    moves.push({ x: -1, y: 0 }, { x: 1, y: 0 }, { x: 0, y: -1 }, { x: 0, y: 1 });
-
-    for (const m of moves) {
-      const nx = enemy.x + m.x;
-      const ny = enemy.y + m.y;
-      if (this._isWalkable(nx, ny) && !this._enemyAt(nx, ny)) {
-        enemy.x = nx;
-        enemy.y = ny;
+  fireWeapon(u, forcedTarget) {
+    const w = u.weapon;
+    // BLOOM-style support: heal a hurt ally if one is in range, else shoot enemy
+    if (w.heal) {
+      const ally = this.nearestHurtAlly(u, w.range);
+      if (ally) {
+        this.spawnBolt(u, ally, { heal: w.heal, proj: 'orbHeal', team: u.team });
+        u.fireCd = w.rate;
+        if (u.isPlayer) this.gainUlt(u, 6);
         return;
       }
     }
+    let target = forcedTarget;
+    if (!target) target = this.nearestEnemyInRange(u, w.range);
+    let aim;
+    if (target) aim = this.aimAt(u, target);
+    else if (u.isPlayer && u.moveDir) aim = u.moveDir;
+    else aim = { x: u.face, y: 0 };
+
+    const pellets = w.pellets || 1;
+    const dmgMul = u.buffs.rampage ? 3 : 1;
+    for (let i = 0; i < pellets; i++) {
+      const spread = (Math.random() - 0.5) * 2 * (w.spread || 0) + (pellets > 1 ? (i - (pellets - 1) / 2) * 0.12 : 0);
+      const a = Math.atan2(aim.y, aim.x) + spread;
+      this.spawnBolt(u, null, {
+        dmg: w.dmg * dmgMul, proj: w.proj, team: u.team,
+        vx: Math.cos(a), vy: Math.sin(a), range: w.range,
+      });
+    }
+    u.fireCd = w.rate * (u.buffs.rampage ? 0.5 : 1);
+    this.muzzle(u, aim);
   }
 
-  // ── ITEMS ─────────────────────────────────────────────────────────────
-
-  _pickupItem(item) {
-    const data = ITEM_DATA[item.type];
-    const spr  = this.entitySprites.get(item);
-    if (spr) { this.tweens.killTweensOf(spr); spr.destroy(); }
-    this.entities = this.entities.filter(e => e !== item);
-    this.entitySprites.delete(item);
-
-    if (item.type === 'gold') {
-      const v = item.value || 10;
-      this.player.gold += v;
-      this._addMessage(`Picked up ${v} gold coins!`);
-      return;
-    }
-
-    if (data.subtype === 'weapon') {
-      const old = this.player.weapon;
-      this.player.weapon = item.type;
-      this._addMessage(`Equipped ${data.name}! (${data.desc})${old ? ` (replaced ${old})` : ''}`);
-    } else if (data.subtype === 'armor') {
-      const old = this.player.armor;
-      this.player.armor = item.type;
-      this._addMessage(`Equipped ${data.name}! (${data.desc})${old ? ` (replaced ${old})` : ''}`);
-    } else {
-      this.player.inventory.push(item.type);
-      this._addMessage(`Picked up ${data.name}.`);
-      if (this.player.inventory.length > 8) this.player.inventory.shift(); // cap
-    }
+  nearestEnemyInRange(u, range) {
+    let best = null, bd = range;
+    this.units.forEach(o => {
+      if (!o.alive || o.team === u.team) return;
+      const d = this.dist(u.gx, u.gy, o.gx, o.gy);
+      if (d <= bd) { bd = d; best = o; }
+    });
+    return best;
   }
 
-  _useItem(type) {
-    const data = ITEM_DATA[type];
-    if (!data) return;
-    const idx = this.player.inventory.indexOf(type);
-    if (idx < 0) return;
-    this.player.inventory.splice(idx, 1);
-
-    if (type === 'seltzer') {
-      const healed = Math.min(data.heal, this.player.maxHp - this.player.hp);
-      this.player.hp += healed;
-      const fx = this.add.image(this.playerSprite.x, this.playerSprite.y, 'effects', 'heal').setDepth(12);
-      this.tweens.add({ targets: fx, y: fx.y - 20, alpha: 0, duration: 600, onComplete: () => fx.destroy() });
-      this._addMessage(`Drank Seltzer! Healed ${healed} HP.`);
-    } else if (type === 'cream_pie') {
-      // Stun nearest visible enemy
-      const nearby = this.entities
-        .filter(e => e.kind === 'enemy' && this.fog[e.y]?.[e.x] === 2)
-        .sort((a, b) => {
-          const da = Math.abs(a.x - this.player.x) + Math.abs(a.y - this.player.y);
-          const db = Math.abs(b.x - this.player.x) + Math.abs(b.y - this.player.y);
-          return da - db;
-        });
-      if (nearby.length > 0) {
-        nearby[0].stunned = 3;
-        this._addMessage(`SPLAT! ${nearby[0].type} is stunned for 3 turns!`);
-      } else {
-        this._addMessage(`No nearby enemy — wasted pie...`);
-      }
-    } else if (type === 'mystery_box') {
-      this._mysteryEffect();
-    }
-
-    this._endTurn();
-    if (this.uiScene) this.uiScene.refresh();
+  aimAt(u, t) {
+    let dx = t.gx - u.gx, dy = t.gy - u.gy;
+    const m = Math.hypot(dx, dy) || 1;
+    return { x: dx / m, y: dy / m };
   }
 
-  _mysteryEffect() {
-    const effects = [
-      () => { const h = 10 + Math.floor(Math.random() * 15); this.player.hp = Math.min(this.player.maxHp, this.player.hp + h); this._addMessage(`Mystery: Restored ${h} HP!`); },
-      () => { this.player.baseAtk += 2; this._addMessage('Mystery: ATK +2 permanently!'); },
-      () => { this.player.baseDef += 2; this._addMessage('Mystery: DEF +2 permanently!'); },
-      () => { const dmg = 5 + Math.floor(Math.random() * 10); this.player.hp -= dmg; this._addMessage(`Mystery: You take ${dmg} damage from a rogue confetti cannon!`); },
-      () => { this.player.gold += 20; this._addMessage('Mystery: 20 gold rains from the ceiling!'); },
-      () => { this.entities.filter(e=>e.kind==='enemy').forEach(e => e.stunned = 2); this._addMessage('Mystery: All enemies stunned!'); },
-    ];
-    effects[Math.floor(Math.random() * effects.length)]();
+  spawnBolt(u, lockTarget, o) {
+    const sp = Iso.toScreen(u.gx, u.gy);
+    const img = this.add.image(sp.x, sp.y - 16, o.proj).setScale(1.5).setDepth(58000);
+    const b = {
+      sprite: img, gx: u.gx, gy: u.gy, team: o.team,
+      dmg: o.dmg || 0, heal: o.heal || 0, range: o.range || 7,
+      traveled: 0, owner: u, lockTarget,
+      vx: o.vx || 0, vy: o.vy || 0, speed: o.heal ? 9 : 13,
+    };
+    if (o.vx !== undefined) img.setRotation(Math.atan2(o.vy, o.vx));
+    this.bolts.push(b);
   }
 
-  // ── FOG OF WAR ───────────────────────────────────────────────────────
+  updateBolts(dt) {
+    const t = dt / 1000;
+    for (let i = this.bolts.length - 1; i >= 0; i--) {
+      const b = this.bolts[i];
+      let nx, ny;
+      if (b.lockTarget) {
+        if (!b.lockTarget.alive) { this.killBolt(i); continue; }
+        const aim = this.aimAt(b, b.lockTarget);
+        nx = aim.x; ny = aim.y;
+      } else { nx = b.vx; ny = b.vy; }
+      const step = b.speed * t;
+      b.gx += nx * step; b.gy += ny * step; b.traveled += step;
 
-  _computeFOV() {
-    const px = this.player.x, py = this.player.y;
-    const radius = 5;
-    const fog = this.fog;
+      // wall / out of range
+      if (this.isWall(b.gx, b.gy) || b.traveled > b.range + 1) { this.killBolt(i); continue; }
 
-    // Mark previously visible as just-seen (dim)
-    for (let y = 0; y < this.MAP_H; y++) {
-      for (let x = 0; x < this.MAP_W; x++) {
-        if (fog[y][x] === 2) fog[y][x] = 1;
-      }
-    }
+      // barrier block (enemy bolts only)
+      if (b.team === 'enemy' && this.blockedByBarrier(b)) { this.hitSpark(b.gx, b.gy, 'sparkOrange'); this.killBolt(i); continue; }
 
-    // Raycast in 360°
-    for (let angle = 0; angle < 360; angle += 2) {
-      const rad = angle * Math.PI / 180;
-      let rx = px + 0.5, ry = py + 0.5;
-      const rdx = Math.cos(rad), rdy = Math.sin(rad);
-      for (let step = 0; step < radius; step++) {
-        const cx = Math.floor(rx), cy = Math.floor(ry);
-        if (cx < 0 || cx >= this.MAP_W || cy < 0 || cy >= this.MAP_H) break;
-        fog[cy][cx] = 2;
-        const t = this.dungeon.tiles[cy][cx];
-        if (t === TILE.WALL || t === TILE.DOOR) break;
-        rx += rdx * 0.8;
-        ry += rdy * 0.8;
-      }
-    }
-    fog[py][px] = 2;
-  }
-
-  _refreshTiles() {
-    const fog = this.fog;
-    const tiles = this.dungeon.tiles;
-    for (let ty = 0; ty < this.MAP_H; ty++) {
-      for (let tx = 0; tx < this.MAP_W; tx++) {
-        const v = fog[ty][tx];
-        const tSpr = this.tileSprites[ty][tx];
-        const fSpr = this.fogSprites[ty][tx];
-
-        if (v === 0) {
-          tSpr.setTexture('tiles', 'void');
-          fSpr.setAlpha(1);
-        } else {
-          tSpr.setTexture('tiles', this._tileFrame(tiles[ty][tx]));
-          if (v === 1) {
-            fSpr.setAlpha(0.65); // seen-but-dark
-          } else {
-            fSpr.setAlpha(0);    // fully visible
+      // collisions
+      let hit = false;
+      for (const o of this.units) {
+        if (!o.alive) continue;
+        if (b.heal) {
+          if (o === b.lockTarget) {
+            this.heal(o, b.heal); this.hitSpark(b.gx, b.gy, 'sparkLime');
+            if (b.owner.isPlayer) this.gainUlt(b.owner, 4);
+            hit = true; break;
+          }
+        } else if (o.team !== b.team) {
+          if (this.dist(b.gx, b.gy, o.gx, o.gy) < 0.7) {
+            this.damage(o, b.dmg, b.owner);
+            this.hitSpark(b.gx, b.gy, o.team === 'enemy' ? 'sparkRed' : 'sparkCyan');
+            hit = true; break;
           }
         }
       }
+      if (hit) { this.killBolt(i); continue; }
+
+      const sp = Iso.toScreen(b.gx, b.gy);
+      b.sprite.setPosition(sp.x, sp.y - 16);
     }
   }
 
-  _refreshEntityVisibility() {
-    this.entities.forEach(ent => {
-      const spr = this.entitySprites.get(ent);
-      if (!spr) return;
-      const v = this.fog[ent.y]?.[ent.x] || 0;
-      spr.setVisible(v > 0);
-      spr.setAlpha(v === 2 ? 1 : 0.4);
-    });
+  killBolt(i) { this.bolts[i].sprite.destroy(); this.bolts.splice(i, 1); }
+
+  damage(u, amount, from) {
+    if (u.buffs.invuln) return;
+    u.hp -= amount;
+    if (from && from.isPlayer) this.gainUlt(from, amount * 0.5);
+    if (u.hp <= 0) this.kill(u, from);
   }
 
-  // ── DESCENT ───────────────────────────────────────────────────────────
+  heal(u, amount) { u.hp = Math.min(u.maxHp, u.hp + amount); }
 
-  _descend() {
-    if (this.floorNum >= 10) {
-      this._victory();
-      return;
+  kill(u, from) {
+    u.hp = 0; u.alive = false;
+    this.boom(u.gx, u.gy, u.team === 'enemy' ? 'sparkRed' : 'sparkCyan');
+    if (from && from.isPlayer) this.gainUlt(from, 18);
+
+    if (u.team === 'enemy') {
+      // remove after delay; new enemies spawn from the spawn timer
+      this.time.delayedCall(400, () => {
+        const idx = this.units.indexOf(u);
+        if (idx >= 0) { u.sprite.destroy(); this.units.splice(idx, 1); }
+      });
+    } else {
+      // ally / player respawn
+      const delay = u.isPlayer ? 3000 : 4500;
+      this.time.delayedCall(delay, () => {
+        u.hp = u.maxHp; u.alive = true;
+        u.gx = u.respawn.gx; u.gy = u.respawn.gy;
+        for (const k in u.buffs) delete u.buffs[k];
+      });
     }
-    this._addMessage(`Descending to floor ${this.floorNum + 1}...`);
-    this.cameras.main.fadeOut(500, 0, 0, 0);
-    this.cameras.main.once('camerafadeoutcomplete', () => {
-      this.scene.stop('UIScene');
-      this.scene.restart({
-        floor: this.floorNum + 1,
-        seed: this.seed + 1337,
-        playerData: {
-          hp: this.player.hp,
-          maxHp: this.player.maxHp,
-          baseAtk: this.player.baseAtk,
-          baseDef: this.player.baseDef,
-          weapon: this.player.weapon,
-          armor: this.player.armor,
-          inventory: [...this.player.inventory],
-          xp: this.player.xp,
-          level: this.player.level,
-          gold: this.player.gold,
-        }
-      });
-    });
   }
 
-  _victory() {
-    this.gameOver = true;
-    this.scene.stop('UIScene');
-    this.cameras.main.fadeOut(600, 255, 220, 0);
-    this.cameras.main.once('camerafadeoutcomplete', () => {
-      this.scene.start('GameOverScene', {
-        won: true,
-        floor: this.floorNum,
-        level: this.player.level,
-        gold: this.player.gold,
-      });
-    });
+  gainUlt(u, amount) {
+    if (!u.isPlayer) return;
+    u.ult = Math.min(100, u.ult + amount * 0.6);
   }
 
-  _checkDeath() {
-    if (this.player.hp <= 0 && !this.gameOver) {
-      this.player.hp = 0;
-      this.gameOver = true;
-      this._addMessage('YOU HAVE DIED... *honk*');
-      this.playerSprite.setTexture('player', 'dead');
-      this.cameras.main.shake(300, 0.02);
-      this.time.delayedCall(1200, () => {
-        this.scene.stop('UIScene');
-        this.cameras.main.fadeOut(600, 80, 0, 0);
-        this.cameras.main.once('camerafadeoutcomplete', () => {
-          this.scene.start('GameOverScene', {
-            won: false,
-            floor: this.floorNum,
-            level: this.player.level,
-            gold: this.player.gold,
-          });
+  // ---------- ABILITIES ----------
+  useAbility(index) {
+    const u = this.player;
+    if (!u.alive) return;
+    const ab = u.hero.abilities[index];
+    if (!ab) return;
+    const now = time_now();
+    if ((u.cd[ab.key] || 0) > now) return; // on cooldown
+    u.cd[ab.key] = now + ab.cd;
+    this.castAbility(u, ab.key);
+  }
+
+  cooldownFrac(index) {
+    const u = this.player;
+    const ab = u.hero.abilities[index];
+    const left = (u.cd[ab.key] || 0) - time_now();
+    return Phaser.Math.Clamp(left / ab.cd, 0, 1);
+  }
+
+  useUlt() {
+    const u = this.player;
+    if (!u.alive || u.ult < 100) return;
+    u.ult = 0;
+    this.castUlt(u);
+  }
+
+  castAbility(u, key) {
+    const dir = u.moveDir || { x: u.face, y: 0 };
+    switch (key) {
+      case 'dash': {
+        const d = 3.2;
+        let tx = u.gx + dir.x * d, ty = u.gy + dir.y * d;
+        if (this.isWall(tx, ty)) { tx = u.gx + dir.x * 1.5; ty = u.gy + dir.y * 1.5; }
+        if (!this.isWall(tx, ty)) { u.gx = Phaser.Math.Clamp(tx, 0.6, GRID_W - 1.6); u.gy = Phaser.Math.Clamp(ty, 0.6, GRID_H - 1.6); }
+        this.ringFx(u.gx, u.gy, PAL.cyan);
+        break;
+      }
+      case 'burst': {
+        this.ringFx(u.gx, u.gy, PAL.cyan, 3);
+        this.units.forEach(o => {
+          if (o.team !== u.team && o.alive && this.dist(u.gx, u.gy, o.gx, o.gy) < 3) {
+            this.damage(o, 55, u);
+            this.knockback(o, u, 1.5);
+          }
         });
+        break;
+      }
+      case 'shield': {
+        const p = Iso.toScreen(u.gx + dir.x, u.gy + dir.y);
+        const spr = this.add.image(p.x, p.y - 10, 'barrierOrange').setScale(1.8).setDepth(57000);
+        this.barriers.push({ gx: u.gx + dir.x * 1.2, gy: u.gy + dir.y * 1.2, life: 5000, sprite: spr });
+        break;
+      }
+      case 'slam': {
+        this.ringFx(u.gx, u.gy, PAL.orange, 2.6);
+        this.cameras.main.shake(150, 0.006);
+        this.units.forEach(o => {
+          if (o.team !== u.team && o.alive && this.dist(u.gx, u.gy, o.gx, o.gy) < 2.6) {
+            this.damage(o, 30, u);
+            this.knockback(o, u, 2.2);
+          }
+        });
+        break;
+      }
+      case 'heal': {
+        const ally = this.nearestHurtAlly(u, 8) || this.lowestAlly(u);
+        if (ally) {
+          u.buffs.mend = time_now() + 2500;
+          u.mendTarget = ally;
+          this.channelHeal(u, ally, 2500, 18);
+        }
+        break;
+      }
+      case 'nova': {
+        this.ringFx(u.gx, u.gy, PAL.lime, 3);
+        this.units.forEach(o => {
+          if (o.team === u.team && o.alive && this.dist(u.gx, u.gy, o.gx, o.gy) < 3) {
+            this.heal(o, 70);
+            o.buffs.haste = time_now() + 3000;
+          }
+        });
+        break;
+      }
+    }
+  }
+
+  castUlt(u) {
+    const id = u.hero.id;
+    this.bigText(u.hero.ult.name + '!', u.hero.color);
+    if (id === 'zap') {
+      u.buffs.rampage = time_now() + 5000;
+    } else if (id === 'brick') {
+      u.buffs.invuln = time_now() + 4000;
+      // pull enemy attention: nearby enemies briefly knocked
+      this.ringFx(u.gx, u.gy, PAL.orange, 3.5);
+    } else if (id === 'bloom') {
+      // area heal over time
+      this.ultHeal = { gx: u.gx, gy: u.gy, life: 5000, owner: u };
+      const tick = this.time.addEvent({
+        delay: 250, repeat: 19, callback: () => {
+          this.units.forEach(o => {
+            if (o.team === u.team && o.alive && this.dist(u.gx, u.gy, o.gx, o.gy) < 4) this.heal(o, 14);
+          });
+          this.ringFx(u.gx, u.gy, PAL.lime, 4);
+        },
       });
     }
   }
 
-  // ── INVENTORY UI (in-game) ────────────────────────────────────────────
-
-  _openInventory() {
-    if (this.invOpen) return;
-    if (this.player.inventory.length === 0) { this._addMessage('Inventory empty!'); return; }
-    this.invOpen = true;
-    const W = this.scale.width;
-
-    const overlay = this.add.rectangle(W / 2, 240, W - 40, 300, 0x0d0020, 0.95)
-      .setDepth(20).setStrokeStyle(2, 0x880088);
-    const title   = this.add.text(W / 2, 105, '— INVENTORY —', {
-      fontFamily: 'monospace', fontSize: '15px', color: '#cc88ff',
-    }).setOrigin(0.5).setDepth(21);
-
-    const items = [];
-    this.player.inventory.forEach((type, i) => {
-      const data = ITEM_DATA[type];
-      const y = 135 + i * 34;
-      const bg = this.add.rectangle(W / 2, y, W - 60, 28, 0x220033, 0.8)
-        .setDepth(21).setInteractive({ useHandCursor: true })
-        .setStrokeStyle(1, 0x660066);
-      const icon = this.add.image(48, y, 'items', type).setDepth(22);
-      const lbl  = this.add.text(70, y, `${data.name}  ${data.desc}`, {
-        fontFamily: 'monospace', fontSize: '13px', color: '#ddaaff',
-      }).setOrigin(0, 0.5).setDepth(22);
-      const use  = this.add.text(W - 30, y, 'USE', {
-        fontFamily: 'monospace', fontSize: '12px', color: '#ff88ff',
-      }).setOrigin(1, 0.5).setDepth(22);
-
-      bg.on('pointerdown', () => {
-        closeAll(); this._useItem(type);
-      });
-      bg.on('pointerover',  () => bg.setFillStyle(0x440055, 0.9));
-      bg.on('pointerout',   () => bg.setFillStyle(0x220033, 0.8));
-      items.push(bg, icon, lbl, use);
+  channelHeal(u, ally, dur, perTick) {
+    const ev = this.time.addEvent({
+      delay: 250, repeat: Math.floor(dur / 250) - 1, callback: () => {
+        if (!ally.alive || !u.alive) { ev.remove(); return; }
+        this.heal(ally, perTick);
+        this.hitSpark(ally.gx, ally.gy - 0.2, 'sparkLime');
+        this.gainUlt(u, 3);
+      },
     });
-
-    const closeAll = () => {
-      this.invOpen = false;
-      overlay.destroy(); title.destroy(); closeBtn.destroy();
-      items.forEach(i => i.destroy());
-    };
-
-    const closeBtn = this.add.text(W / 2, 130 + this.player.inventory.length * 34 + 20, '[ CLOSE ]', {
-      fontFamily: 'monospace', fontSize: '13px', color: '#886688',
-    }).setOrigin(0.5).setDepth(22).setInteractive({ useHandCursor: true });
-    closeBtn.on('pointerdown', closeAll);
   }
 
-  // ── HELPERS ───────────────────────────────────────────────────────────
-
-  _enemyAt(x, y) {
-    return this.entities.find(e => e.kind === 'enemy' && e.x === x && e.y === y) || null;
+  lowestAlly(u) {
+    let best = null, bf = 1.01;
+    this.units.forEach(o => {
+      if (o.team === u.team && o.alive) { const f = o.hp / o.maxHp; if (f < bf) { bf = f; best = o; } }
+    });
+    return best;
   }
 
-  _itemAt(x, y) {
-    return this.entities.find(e => e.kind === 'item' && e.x === x && e.y === y) || null;
+  knockback(o, from, force) {
+    let dx = o.gx - from.gx, dy = o.gy - from.gy;
+    const m = Math.hypot(dx, dy) || 1;
+    const tx = o.gx + dx / m * force, ty = o.gy + dy / m * force;
+    if (!this.isWall(tx, ty)) { o.gx = Phaser.Math.Clamp(tx, 0.6, GRID_W - 1.6); o.gy = Phaser.Math.Clamp(ty, 0.6, GRID_H - 1.6); }
   }
 
-  _isWalkable(x, y) {
-    const t = this.dungeon.tiles[y]?.[x];
-    return t === TILE.FLOOR || t === TILE.FLOOR2 || t === TILE.BLOOD ||
-           t === TILE.DOOR  || t === TILE.STAIRS  || t === TILE.TORCH;
-  }
-
-  _addMessage(msg) {
-    this.messages.unshift(msg);
-    if (this.messages.length > 5) this.messages.pop();
-    if (this.uiScene) this.uiScene.refreshMessages();
-  }
-
-  // Called by UIScene D-pad
-  onDPad(dir) {
-    if (this.animating || this.gameOver) return;
-    switch (dir) {
-      case 'up':    this._tryMove( 0, -1); break;
-      case 'down':  this._tryMove( 0,  1); break;
-      case 'left':  this._tryMove(-1,  0); break;
-      case 'right': this._tryMove( 1,  0); break;
-      case 'wait':  this._wait();          break;
+  // ---------- BARRIERS ----------
+  updateBarriers(dt) {
+    for (let i = this.barriers.length - 1; i >= 0; i--) {
+      const b = this.barriers[i];
+      b.life -= dt;
+      b.sprite.setAlpha(0.5 + 0.3 * Math.sin(time_now() / 100));
+      if (b.life <= 0) { b.sprite.destroy(); this.barriers.splice(i, 1); }
     }
+  }
+  blockedByBarrier(bolt) {
+    return this.barriers.some(b => this.dist(bolt.gx, bolt.gy, b.gx, b.gy) < 1.4);
+  }
+
+  // ---------- FX ----------
+  muzzle(u, aim) {
+    const sp = Iso.toScreen(u.gx, u.gy);
+    const f = this.add.image(sp.x + aim.x * 14, sp.y - 14 + aim.y * 8, 'sparkWhite').setScale(2).setDepth(58500);
+    this.tweens.add({ targets: f, alpha: 0, scale: 0.5, duration: 120, onComplete: () => f.destroy() });
+  }
+  hitSpark(gx, gy, key) {
+    const sp = Iso.toScreen(gx, gy);
+    const s = this.add.image(sp.x, sp.y - 14, key).setScale(2.2).setDepth(58800);
+    this.tweens.add({ targets: s, alpha: 0, scale: 0.6, angle: 90, duration: 220, onComplete: () => s.destroy() });
+  }
+  boom(gx, gy, key) {
+    const sp = Iso.toScreen(gx, gy);
+    for (let i = 0; i < 8; i++) {
+      const s = this.add.image(sp.x, sp.y - 14, key).setScale(2.5).setDepth(58900);
+      const a = Math.random() * Math.PI * 2, d = 20 + Math.random() * 24;
+      this.tweens.add({ targets: s, x: sp.x + Math.cos(a) * d, y: sp.y - 14 + Math.sin(a) * d, alpha: 0, scale: 0.4, duration: 400, onComplete: () => s.destroy() });
+    }
+  }
+  ringFx(gx, gy, color, radius = 1.5) {
+    const sp = Iso.toScreen(gx, gy);
+    const g = this.add.graphics().setDepth(58950);
+    const col = Phaser.Display.Color.HexStringToColor(color).color;
+    let r = 4;
+    const max = radius * 40;
+    const ev = this.time.addEvent({
+      delay: 16, repeat: 18, callback: () => {
+        g.clear();
+        g.lineStyle(3, col, 1 - r / max);
+        g.strokeEllipse(sp.x, sp.y - 10, r * 2, r);
+        r += (max - 4) / 18;
+        if (r >= max) { g.destroy(); }
+      },
+    });
+  }
+  bigText(str, color) {
+    const t = UIKit.text(this, this.cameras.main.centerX, 220, str, 40, color, { stroke: PAL.ink, strokeW: 8 });
+    t.setScrollFactor(0).setDepth(70000).setScale(0.5);
+    this.tweens.add({ targets: t, scale: 1.1, duration: 250, yoyo: true, hold: 600, onComplete: () => t.destroy() });
+  }
+
+  // ---------- HEALTH BARS ----------
+  drawBars() {
+    const g = this.barG;
+    g.clear();
+    this.units.forEach(u => {
+      if (!u.alive) return;
+      const sp = Iso.toScreen(u.gx, u.gy);
+      const w = 28, x = sp.x - w / 2, y = sp.y - (u.isPlayer ? 56 : 48);
+      g.fillStyle(0x000000, 0.7); g.fillRect(x - 1, y - 1, w + 2, 6);
+      const frac = Phaser.Math.Clamp(u.hp / u.maxHp, 0, 1);
+      let col = u.team === 'ally' ? 0x3df2ff : 0xff3d5e;
+      if (u.isPlayer) col = 0x7dff5c;
+      g.fillStyle(col, 1); g.fillRect(x, y, w * frac, 4);
+      if (u.buffs.invuln) { g.lineStyle(1, 0xffd23d, 1); g.strokeRect(x - 1, y - 1, w + 2, 6); }
+    });
+    // payload progress marker handled by UI scene
+  }
+
+  dist(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
+
+  endMatch(win) {
+    this.gameOver = true;
+    this.scene.stop('UI');
+    this.cameras.main.fadeOut(400, 0, 0, 0);
+    this.time.delayedCall(420, () => {
+      this.scene.stop('Game');
+      this.scene.start('Result', { win, heroId: this.heroId, progress: this.payload.progress });
+    });
   }
 }
+
+// global "now" helper (Phaser time)
+function time_now() { return performance.now(); }
