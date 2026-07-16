@@ -4,113 +4,115 @@ class MenuScene extends Phaser.Scene {
   create() {
     const W = this.scale.width, H = this.scale.height;
 
-    // Background — dark with subtle texture
-    this.add.rectangle(W / 2, H / 2, W, H, 0x050008);
+    // Background
+    this.add.rectangle(W/2, H/2, W, H, 0x050208);
 
-    // Animated curtain stripes
-    for (let i = 0; i < 6; i++) {
-      const stripe = this.add.rectangle(i * 70 - 10, H / 2, 30, H, 0x110022, 0.3);
-      this.tweens.add({ targets: stripe, x: stripe.x + 420, duration: 8000 + i * 1200, repeat: -1, ease: 'Linear' });
+    // Animated tiles strip at bottom
+    for (let x = 0; x < W; x += 32) {
+      this.add.image(x + 16, H - 16, 'tileset', 11).setScale(2).setAlpha(0.5);
+      this.add.image(x + 16, H - 48, 'tileset', 2).setScale(2).setAlpha(0.5);
     }
 
-    // Blood drip decorations
-    for (let i = 0; i < 8; i++) {
-      const drip = this.add.rectangle(40 + i * 46, 20, 4, 20 + Math.random() * 40, 0x880000, 0.7);
-    }
+    // Title glow
+    const glow = this.add.rectangle(W/2, H/2 - 120, 280, 90, 0xaa6600, 0.08);
+    this.tweens.add({ targets: glow, alpha: 0.18, duration: 1400, yoyo: true, repeat: -1 });
 
-    // Title
-    this.add.text(W / 2, 90, '🎪', { fontSize: '48px' }).setOrigin(0.5);
-    const titleShadow = this.add.text(W / 2 + 3, 153, 'CIRCUS\nINFERNO', {
-      fontFamily: 'monospace', fontSize: '40px', color: '#440000', align: 'center',
+    // Title text
+    const shadow = this.add.text(W/2 + 3, H/2 - 117, 'DUNGEON\nDEPTHS', {
+      fontFamily: 'monospace', fontSize: '38px', color: '#331100', align: 'center',
     }).setOrigin(0.5);
-    const title = this.add.text(W / 2, 150, 'CIRCUS\nINFERNO', {
-      fontFamily: 'monospace', fontSize: '40px', color: '#ff1111', align: 'center',
-      stroke: '#ff0000', strokeThickness: 3,
+    const title = this.add.text(W/2, H/2 - 120, 'DUNGEON\nDEPTHS', {
+      fontFamily: 'monospace', fontSize: '38px', color: '#cc8833',
+      stroke: '#ffcc44', strokeThickness: 2, align: 'center',
     }).setOrigin(0.5);
-    this.tweens.add({ targets: title, scaleX: 1.04, scaleY: 1.04, duration: 1200, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+    this.tweens.add({ targets: title, scaleX: 1.03, scaleY: 1.03, duration: 1200, yoyo: true, repeat: -1 });
 
-    // Tagline
-    this.add.text(W / 2, 235, '"The show must go on."', {
-      fontFamily: 'monospace', fontSize: '13px', color: '#886688', align: 'center',
-      fontStyle: 'italic',
+    // Subtitle
+    this.add.text(W/2, H/2, 'A Dungeon Roguelike', {
+      fontFamily: 'monospace', fontSize: '13px', color: '#886633', fontStyle: 'italic',
     }).setOrigin(0.5);
 
-    // Enemy preview sprites
-    const enemyNames = ['jester', 'mime', 'juggler', 'balloondog', 'ringmaster'];
-    enemyNames.forEach((name, i) => {
-      const ex = 36 + i * 70;
-      const ey = 300;
-      const img = this.add.image(ex, ey, 'enemies', `${name}_0`).setScale(2);
-      this.tweens.add({ targets: img, y: ey - 6, duration: 600 + i * 120, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+    // Enemy showcase — animated sprites
+    const enemies = [
+      { key: 'skeleton1_idle', anim: 'skeleton1-idle', x: W/2 - 80, y: H/2 + 60 },
+      { key: 'skeleton2_idle', anim: 'skeleton2-idle', x: W/2,       y: H/2 + 60 },
+      { key: 'vampire_idle',   anim: 'vampire-idle',   x: W/2 + 80, y: H/2 + 60 },
+    ];
+    enemies.forEach(e => {
+      const spr = this.add.sprite(e.x, e.y, e.key).setScale(1.4).play(e.anim);
+      this.tweens.add({ targets: spr, y: e.y - 6, duration: 800 + Math.random()*400, yoyo: true, repeat: -1 });
     });
 
-    // Player preview
-    const player = this.add.image(W / 2, 365, 'player', 'idle').setScale(3);
-    this.tweens.add({ targets: player, y: 362, scaleX: 3.1, duration: 900, yoyo: true, repeat: -1 });
-
-    // --- Buttons ---
-    this._makeButton(W / 2, 430, 'NEW GAME', 0xcc1111, () => {
-      this.cameras.main.fadeOut(300, 0, 0, 0);
-      this.cameras.main.once('camerafadeoutcomplete', () => {
-        this.scene.start('GameScene', { floor: 1, seed: Math.floor(Math.random() * 99999) });
-      });
+    // Buttons
+    this._btn(W/2, H/2 + 155, 'BEGIN DESCENT', 0xaa6633, () => {
+      this.cameras.main.fadeOut(400, 0, 0, 0);
+      this.cameras.main.once('camerafadeoutcomplete', () =>
+        this.scene.start('GameScene', { floor: 1, seed: Math.floor(Math.random() * 99999) })
+      );
     });
+    this._btn(W/2, H/2 + 210, 'HOW TO PLAY', 0x445566, () => this._showHelp(W, H));
 
-    this._makeButton(W / 2, 500, 'HOW TO PLAY', 0x441166, () => this._showHelp());
-
-    // Version
-    this.add.text(W - 8, H - 8, 'v1.0', {
-      fontFamily: 'monospace', fontSize: '10px', color: '#443344',
-    }).setOrigin(1, 1);
+    // Flavour text
+    const quips = [
+      'The dungeon remembers those who fell.',
+      'Darkness is patient. Are you?',
+      'Every corridor holds a new death.',
+      'Steel your nerves. Check your gold.',
+    ];
+    this.add.text(W/2, H - 20, quips[Math.floor(Math.random() * quips.length)], {
+      fontFamily: 'monospace', fontSize: '10px', color: '#443322', fontStyle: 'italic',
+    }).setOrigin(0.5);
   }
 
-  _makeButton(x, y, label, color, cb) {
-    const bg = this.add.rectangle(x, y, 220, 44, color, 0.15)
-      .setInteractive({ useHandCursor: true })
-      .setStrokeStyle(1, color, 0.8);
-
+  _btn(x, y, label, color, cb) {
+    const bg = this.add.rectangle(x, y, 220, 42, color, 0.15)
+      .setInteractive({ useHandCursor: true }).setStrokeStyle(1, color, 0.7);
     const txt = this.add.text(x, y, label, {
-      fontFamily: 'monospace', fontSize: '18px', color: '#' + color.toString(16).padStart(6, '0'),
-      align: 'center',
+      fontFamily: 'monospace', fontSize: '16px',
+      color: '#' + color.toString(16).padStart(6, '0'),
     }).setOrigin(0.5);
-
-    bg.on('pointerover',  () => { bg.setFillStyle(color, 0.35); txt.setStyle({ color: '#ffffff' }); });
+    bg.on('pointerover',  () => { bg.setFillStyle(color, 0.3); txt.setStyle({ color: '#ffffff' }); });
     bg.on('pointerout',   () => { bg.setFillStyle(color, 0.15); txt.setStyle({ color: '#' + color.toString(16).padStart(6, '0') }); });
-    bg.on('pointerdown',  () => { bg.setScale(0.95); });
+    bg.on('pointerdown',  () => bg.setScale(0.96));
     bg.on('pointerup',    () => { bg.setScale(1); cb(); });
   }
 
-  _showHelp() {
-    const W = this.scale.width, H = this.scale.height;
-    const overlay = this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.85).setDepth(10).setInteractive();
-    const txt = [
-      'HOW TO PLAY',
+  _showHelp(W, H) {
+    const overlay = this.add.rectangle(W/2, H/2, W, H, 0x000000, 0.88).setInteractive();
+    const box = this.add.rectangle(W/2, H/2, 300, 360, 0x0d0810).setStrokeStyle(1, 0x886633, 0.8);
+    const title = this.add.text(W/2, H/2 - 155, 'HOW TO PLAY', {
+      fontFamily: 'monospace', fontSize: '16px', color: '#cc8833',
+    }).setOrigin(0.5);
+    const lines = [
+      'MOVE: Arrow keys / WASD',
+      'or swipe the screen',
       '',
-      'Use the D-PAD to move.',
-      'Walk into enemies to attack.',
-      'Walk into items to pick them up.',
+      'BUMP enemies to attack',
       '',
-      'ITEMS',
-      '  Weapons  → equip for more ATK',
-      '  Armor    → equip for more DEF',
-      '  Seltzer  → restore 15 HP',
-      '  Cream Pie→ stun enemies',
-      '  Mystery  → random effect',
+      'WAIT: Z or tap center',
+      '(heals 1 HP per turn)',
       '',
-      'Reach the STAIRS (◎) to',
-      'descend deeper into the circus.',
+      '[I] / BAG: open inventory',
       '',
-      'BOSS every 5th floor.',
-      'Reach floor 10 and escape!',
+      'Find STAIRS to descend',
+      'to the next floor',
       '',
-      '[ TAP TO CLOSE ]',
-    ].join('\n');
-
-    const panel = this.add.text(W / 2, H / 2, txt, {
-      fontFamily: 'monospace', fontSize: '13px', color: '#ddaadd',
+      'Collect GOLD and ITEMS',
+      'to grow stronger',
+    ];
+    const textObj = this.add.text(W/2, H/2 - 120, lines.join('\n'), {
+      fontFamily: 'monospace', fontSize: '12px', color: '#aa9988',
       align: 'center', lineSpacing: 4,
-    }).setOrigin(0.5).setDepth(11);
+    }).setOrigin(0.5, 0);
+    const closeBtn = this.add.rectangle(W/2, H/2 + 170, 140, 36, 0x664422, 0.8)
+      .setInteractive({ useHandCursor: true }).setStrokeStyle(1, 0xcc8833, 0.6);
+    const closeTxt = this.add.text(W/2, H/2 + 170, 'CLOSE', {
+      fontFamily: 'monospace', fontSize: '14px', color: '#cc8833',
+    }).setOrigin(0.5);
 
-    overlay.once('pointerdown', () => { overlay.destroy(); panel.destroy(); });
+    const all = [overlay, box, title, textObj, closeBtn, closeTxt];
+    const close = () => all.forEach(o => o.destroy());
+    overlay.on('pointerdown', close);
+    closeBtn.on('pointerdown', close);
   }
 }

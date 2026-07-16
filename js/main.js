@@ -3,7 +3,7 @@ const config = {
   parent: 'game',
   width: 360,
   height: 640,
-  backgroundColor: '#0a0006',
+  backgroundColor: '#050208',
   scale: {
     mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.CENTER_BOTH
