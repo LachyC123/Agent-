@@ -2,6 +2,8 @@ const TS = 32;
 const MAP_W = 30;
 const MAP_H = 30;
 const FOV_R = 7;
+const ENEMY_SCALE  = 1.5;  // pack2 sprites have ~20px of art in 32px frame
+const PLAYER_TINT  = 0xffffcc; // warm yellow tint to distinguish player from enemies
 
 class GameScene extends Phaser.Scene {
   constructor() { super({ key: 'GameScene' }); }
@@ -41,14 +43,21 @@ class GameScene extends Phaser.Scene {
   }
 
   update() {
-    // Keep enemy HP bars in sync with sprite position during tweens
+    // Sync player indicator with sprite
+    if (this.playerMarker) {
+      this.playerMarker.x = this.playerSpr.x;
+      this.playerMarker.y = this.playerSpr.y;
+    }
+
+    // Sync enemy HP bars with sprite position during tweens
     const bw = TS - 4;
+    const barOffset = -Math.round(TS * ENEMY_SCALE * 0.55); // above sprite top
     for (const e of this.enemies) {
       if (!e.alive || !e.hpBg) continue;
       e.hpBg.x = e.spr.x;
-      e.hpBg.y = e.spr.y - 20;
+      e.hpBg.y = e.spr.y + barOffset;
       e.hpFg.x = e.spr.x - bw / 2;
-      e.hpFg.y = e.spr.y - 20;
+      e.hpFg.y = e.spr.y + barOffset;
     }
   }
 
@@ -109,8 +118,11 @@ class GameScene extends Phaser.Scene {
 
   _buildPlayerSprite() {
     const p = this.player;
+    // Gold tile-border under player so they stand out from enemies
+    this.playerMarker = this.add.rectangle(p.x * TS + TS/2, p.y * TS + TS/2, TS - 2, TS - 2, 0x000000, 0)
+      .setStrokeStyle(2, 0xffcc22, 0.85).setDepth(3);
     this.playerSpr = this.add.sprite(p.x * TS + TS/2, p.y * TS + TS/2, 'player', 0)
-      .setScale(2).setDepth(5);
+      .setScale(2).setDepth(5).setTint(PLAYER_TINT);
     this.playerSpr.play('player-idle');
   }
 
@@ -123,7 +135,7 @@ class GameScene extends Phaser.Scene {
       const sy = e.y * TS + TS/2;
 
       const spr = this.add.sprite(sx, sy, `${e.spriteKey}_idle`, 0)
-        .setScale(1).setDepth(4).setAlpha(0);
+        .setScale(ENEMY_SCALE).setDepth(4).setAlpha(0);
       spr.play(`${e.spriteKey}-idle`);
 
       // HP bars — position managed by update()
@@ -286,7 +298,7 @@ class GameScene extends Phaser.Scene {
 
     const dmg = Math.max(1, this.player.atk - enemy.def);
     enemy.hp -= dmg;
-    this._floatText(enemy.spr.x, enemy.spr.y - 16, `-${dmg}`, '#ff4444', true);
+    this._floatText(enemy.spr.x, enemy.spr.y - Math.round(TS * ENEMY_SCALE * 0.6), `-${dmg}`, '#ff4444', true);
 
     if (enemy.hp <= 0) {
       enemy.alive = false;
@@ -342,7 +354,7 @@ class GameScene extends Phaser.Scene {
   _enemyAttackPlayer(enemy) {
     const dmg = Math.max(1, enemy.atk - this.player.def);
     this.player.hp -= dmg;
-    this._floatText(this.playerSpr.x, this.playerSpr.y - 14, `-${dmg}`, '#ff8844', true);
+    this._floatText(this.playerSpr.x, this.playerSpr.y - 22, `-${dmg}`, '#ff8844', true);
     this._flashSprite(this.playerSpr, 0xff0000);
     this.cameras.main.shake(80, 0.006);
     this.playerSpr.play('player-hurt');
@@ -712,7 +724,10 @@ class GameScene extends Phaser.Scene {
 
   _flashSprite(spr, color) {
     spr.setTint(color);
-    this.time.delayedCall(160, () => spr.clearTint());
+    this.time.delayedCall(160, () => {
+      if (spr === this.playerSpr) spr.setTint(PLAYER_TINT);
+      else spr.clearTint();
+    });
   }
 
   // ─── UI BRIDGE ───────────────────────────────────────────────────────────────
